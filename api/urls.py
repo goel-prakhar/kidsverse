@@ -60,4 +60,15 @@ urlpatterns = [
     path('students/<uuid:studentId>/profile', views.StudentProfileView.as_view(), name='student-profile'),
     path('students/<uuid:studentId>/profile/our-journey', views.StudentOurJourneyView.as_view(), name='student-our-journey'),
     path('students/<uuid:studentId>/profile/cards', views.StudentCardsView.as_view(), name='student-cards'),
+
+    # Curriculum & Content Studio Ingestion
+    path('admin/content/feed', views.AdminContentFeedView.as_view(), name='admin-content-feed'),
+    path('admin/content/packages', views.AdminContentPackageListView.as_view(), name='admin-content-packages-list'),
+    path('admin/content/packages/<uuid:packageId>', views.AdminContentPackageDetailView.as_view(), name='admin-content-package-detail'),
+    path('curriculum/tree', views.CurriculumTreeView.as_view(), name='curriculum-tree'),
+    path('curriculums', views.CurriculumListView.as_view(), name='curriculum-list'),
+    path('curriculums/<uuid:curriculumId>', views.CurriculumDetailView.as_view(), name='curriculum-detail'),
+    path('curriculums/<uuid:curriculumId>/subjects', views.CurriculumSubjectCreateView.as_view(), name='curriculum-add-subject'),
+    path('topics/<uuid:topicId>/concepts', views.TopicConceptCreateView.as_view(), name='topic-add-concept'),
+    path('themes', views.ThemeListView.as_view(), name='themes-list'),
 ]

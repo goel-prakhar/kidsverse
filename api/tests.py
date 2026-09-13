@@ -3,8 +3,10 @@ from django.urls import reverse
 from rest_framework.test import APIClient
 from api.models import (
     Parent, Student, Interest, Goal, AvatarCharacter, AvatarCategory,
-    AvatarItem, Subject, Topic, TopicTier, Mission, Test, TestQuestion,
-    Challenge, ChallengeOpponent, StudentStat
+    AvatarItem, Curriculum, Theme, Subject, Topic, TopicTier, Mission, Test, TestQuestion,
+    Challenge, ChallengeQuestion, ChallengeOpponent, StudentStat, Concept,
+    ConceptPackage, LearningContent, CheckForUnderstandingQuestion,
+    ConceptTestQuestion, BattleQuestion
 )
 from api.jwt_utils import generate_jwt_token
 
@@ -126,3 +128,179 @@ class KidsverseAPITestCase(TestCase):
         forbidden_res = self.client.get(f'/api/v1/students/{s1.id}/profile')
         self.assertEqual(forbidden_res.status_code, 403)
         self.assertEqual(forbidden_res.json()['error']['code'], "FORBIDDEN")
+
+    def test_curriculum_content_feed_and_retrieval(self):
+        # 1. Feed complete payload matching the portal
+        payload = {
+            "curriculum": {
+                "grade": "Grade 4",
+                "board": "CBSE",
+                "subject": "Mathematics",
+                "topic": "Fractions"
+            },
+            "concept": {
+                "name": "Equivalent Fractions",
+                "learning_objective": "Understand that fractions that look different can represent the same value."
+            },
+            "theme_interest": "Space",
+            "content_type": "concept_package",
+            "learning_content": {
+                "teaching_method": "Visual fuel tank partitioning in orbit",
+                "image_url": "https://assets.kidsverse.app/concepts/space_fractions.png",
+                "image_prompt": "Astronaut dividing fuel canisters into 4 equal segments",
+                "explanation": "If an astronaut takes 2 out of 4 fuel pods (2/4), that is the exact same amount as half a fuel cell (1/2)!",
+                "hints": [
+                    "Divide both the top and bottom number by 2.",
+                    "Look at the visual fuel gauge.",
+                    "Half of four is two."
+                ],
+                "nova_script": "Commander, look at the fuel reserves! Can you help calibrate them?",
+                "nova_feedback": "Spectacular navigation! You've mastered equivalent fractions."
+            },
+            "check_for_understanding": [
+                {
+                    "question": "Which fraction is equivalent to 1/2?",
+                    "options": ["2/4", "1/3", "3/5", "4/6"],
+                    "answer": "2/4",
+                    "difficulty": "Easy",
+                    "explanation": "2/4 simplifies to 1/2 when dividing both by 2."
+                }
+            ],
+            "test_questions": {
+                "one_time": False,
+                "questions": [
+                    {
+                        "question": "If a space pod uses 3/6 of its fuel, what fraction has it used?",
+                        "options": ["1/2", "1/3", "2/3", "3/4"],
+                        "answer": "1/2",
+                        "difficulty": "Medium",
+                        "marks": 2,
+                        "explanation": "3 divided by 3 is 1, and 6 divided by 3 is 2."
+                    }
+                ]
+            },
+            "battle_questions": [
+                {
+                    "question": "Quick battle: Is 4/8 equal to 1/2?",
+                    "options": ["Yes", "No"],
+                    "answer": "Yes",
+                    "difficulty": "Hard",
+                    "xp": 20,
+                    "explanation": "Both numerator and denominator can be divided by 4."
+                }
+            ],
+            "challenge": {
+                "one_time": False,
+                "questions": [
+                    {
+                        "question": "Boss challenge: Find the missing numerator: ?/10 = 1/2",
+                        "options": ["5", "2", "4", "6"],
+                        "answer": "5",
+                        "difficulty": "Hard",
+                        "xp": 35,
+                        "explanation": "Half of 10 is 5.",
+                        "nova_feedback": "Incredible! You defeated the challenge!"
+                    }
+                ]
+            }
+        }
+
+        # Clear credentials for public/admin endpoint
+        self.client.credentials()
+
+        # Ingest content package
+        feed_res = self.client.post('/api/v1/admin/content/feed', payload, format='json')
+        self.assertEqual(feed_res.status_code, 201)
+        data = feed_res.data['data']
+        self.assertEqual(data['subject'], "Mathematics")
+        self.assertEqual(data['board'], "CBSE")
+        self.assertEqual(data['grade'], "Grade 4")
+        self.assertEqual(data['concept'], "Equivalent Fractions")
+        self.assertEqual(data['theme'], "Space")
+        self.assertEqual(data['questions_saved']['total'], 4)
+        self.assertIn('curriculum_id', data)
+        self.assertIn('theme_id', data)
+        self.assertIn('learning_content_id', data)
+        self.assertIn('mission_id', data)
+        self.assertIn('test_id', data)
+        self.assertIn('challenge_id', data)
+
+        package_id = data['package_id']
+
+        # Verify database records are properly segregated into dedicated relational tables
+        self.assertTrue(Curriculum.objects.filter(board="CBSE", grade="Grade 4").exists())
+        self.assertTrue(Theme.objects.filter(name="Space").exists())
+        self.assertTrue(LearningContent.objects.filter(package_id=package_id).exists())
+        self.assertEqual(CheckForUnderstandingQuestion.objects.filter(package_id=package_id).count(), 1)
+        self.assertEqual(ConceptTestQuestion.objects.filter(package_id=package_id).count(), 1)
+        self.assertEqual(BattleQuestion.objects.filter(package_id=package_id).count(), 1)
+        self.assertEqual(ChallengeQuestion.objects.filter(package_id=package_id).count(), 1)
+
+        # 2. Ingest a second package for the SAME concept but under a DIFFERENT theme ("Animals")
+        payload_animals = dict(payload)
+        payload_animals["theme_interest"] = "Animals"
+        payload_animals["learning_content"] = {
+            "teaching_method": "Jungle safari pizza division",
+            "explanation": "Monkeys dividing fruit into equal shares",
+            "hints": ["Each monkey gets an equal portion"],
+            "nova_script": "Look at the animals sharing!",
+            "nova_feedback": "Great animal care!"
+        }
+        feed_animals_res = self.client.post('/api/v1/admin/content/feed', payload_animals, format='json')
+        self.assertEqual(feed_animals_res.status_code, 201)
+
+        # Verify: Multiple themes for the same concept!
+        concept_obj = Concept.objects.get(name="Equivalent Fractions")
+        self.assertEqual(concept_obj.themes.count(), 2)
+        theme_names = set(concept_obj.themes.values_list('name', flat=True))
+        self.assertEqual(theme_names, {"Space", "Animals"})
+
+        # 3. List Packages with filtering
+        list_res = self.client.get('/api/v1/admin/content/packages?grade=Grade+4&board=CBSE&theme=Space')
+        self.assertEqual(list_res.status_code, 200)
+        self.assertGreaterEqual(list_res.data['count'], 1)
+        self.assertEqual(list_res.data['packages'][0]['concept_name'], "Equivalent Fractions")
+
+        # 4. Get Package Detail (reconstructed from segregated tables)
+        detail_res = self.client.get(f'/api/v1/admin/content/packages/{package_id}')
+        self.assertEqual(detail_res.status_code, 200)
+        pkg = detail_res.data
+        self.assertEqual(pkg['curriculum']['grade'], "Grade 4")
+        self.assertEqual(pkg['curriculum']['board'], "CBSE")
+        self.assertEqual(pkg['concept']['name'], "Equivalent Fractions")
+        self.assertEqual(len(pkg['check_for_understanding']), 1)
+        self.assertEqual(len(pkg['test_questions']['questions']), 1)
+        self.assertEqual(len(pkg['battle_questions']), 1)
+        self.assertEqual(len(pkg['challenge']['questions']), 1)
+        self.assertEqual(pkg['learning_content']['hints'][0], "Divide both the top and bottom number by 2.")
+
+        # 5. Curriculum Tree check
+        tree_res = self.client.get('/api/v1/curriculum/tree?grade=Grade+4&board=CBSE')
+        self.assertEqual(tree_res.status_code, 200)
+        self.assertGreaterEqual(tree_res.data['count'], 1)
+        found_topic = any(t['name'] == "Fractions" for t in tree_res.data['topics'])
+        self.assertTrue(found_topic)
+
+        # 6. Curriculum Management Endpoints
+        curricula_res = self.client.get('/api/v1/curriculums')
+        self.assertEqual(curricula_res.status_code, 200)
+        self.assertGreaterEqual(curricula_res.data['count'], 1)
+
+        curriculum_id = data['curriculum_id']
+        curr_detail_res = self.client.get(f'/api/v1/curriculums/{curriculum_id}')
+        self.assertEqual(curr_detail_res.status_code, 200)
+        self.assertEqual(curr_detail_res.data['board'], 'CBSE')
+        self.assertEqual(curr_detail_res.data['grade'], 'Grade 4')
+
+        # Add subject to curriculum
+        add_subj_res = self.client.post(f'/api/v1/curriculums/{curriculum_id}/subjects', {"name": "Science"}, format='json')
+        self.assertEqual(add_subj_res.status_code, 201)
+
+        # 7. Themes Endpoint
+        themes_res = self.client.get('/api/v1/themes')
+        self.assertEqual(themes_res.status_code, 200)
+        self.assertGreaterEqual(themes_res.data['count'], 2)
+
+        # Create new theme
+        create_theme_res = self.client.post('/api/v1/themes', {"name": "Robots"}, format='json')
+        self.assertEqual(create_theme_res.status_code, 201)

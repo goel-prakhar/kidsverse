@@ -1,12 +1,14 @@
 from rest_framework import serializers
 from api.models import (
     Parent, Student, Interest, StudentInterest, Goal, StudentGoal,
-    OnboardingStep, Subject, SubjectGradeAvailability, StudentSubjectUnlock,
+    OnboardingStep, Curriculum, Theme, Subject, SubjectGradeAvailability, StudentSubjectUnlock,
     Topic, TopicJourneyMeta, StudentTopicProgress, TopicTier, Mission,
     MissionProgress, Test, TestQuestion, TestAttempt, TestAttemptAnswer,
     ExtraLearningRecommendation, Challenge, ChallengeOpponent, ChallengeBattle,
     JourneyMilestone, StudentJourneyProgress, StudentCard, NovaInteraction,
-    AvatarCharacter, AvatarCategory, AvatarItem, StudentAvatar, StudentStat
+    AvatarCharacter, AvatarCategory, AvatarItem, StudentAvatar, StudentStat,
+    Concept, ConceptPackage, LearningContent, CheckForUnderstandingQuestion,
+    ConceptTestQuestion, BattleQuestion, ChallengeQuestion, ConceptQuestion
 )
 
 class ParentSerializer(serializers.ModelSerializer):
@@ -198,3 +200,112 @@ class StudentCardSerializer(serializers.ModelSerializer):
     class Meta:
         model = StudentCard
         fields = ['id', 'card_type', 'title', 'data', 'earned_at']
+
+
+class CurriculumSerializer(serializers.ModelSerializer):
+    subjects_count = serializers.SerializerMethodField()
+    topics_count = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Curriculum
+        fields = ['id', 'name', 'code', 'board', 'grade', 'description', 'is_active', 'subjects_count', 'topics_count', 'created_at', 'updated_at']
+
+    def get_subjects_count(self, obj):
+        return obj.subjects.count()
+
+    def get_topics_count(self, obj):
+        return obj.topics.count()
+
+
+class ThemeSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Theme
+        fields = ['id', 'name', 'slug', 'description', 'icon_asset', 'order_index', 'is_active']
+
+
+class LearningContentSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = LearningContent
+        fields = [
+            'id', 'package_id', 'teaching_method', 'explanation', 'image_url',
+            'image_prompt', 'hints', 'nova_script', 'nova_feedback'
+        ]
+
+
+class CheckForUnderstandingQuestionSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = CheckForUnderstandingQuestion
+        fields = ['id', 'question_text', 'options', 'correct_answer', 'difficulty', 'explanation', 'order_index']
+
+
+class ConceptTestQuestionSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ConceptTestQuestion
+        fields = ['id', 'question_text', 'options', 'correct_answer', 'difficulty', 'marks', 'explanation', 'order_index', 'is_one_time']
+
+
+class BattleQuestionSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = BattleQuestion
+        fields = ['id', 'question_text', 'options', 'correct_answer', 'difficulty', 'xp', 'explanation', 'order_index']
+
+
+class ChallengeQuestionSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ChallengeQuestion
+        fields = ['id', 'question_text', 'options', 'correct_answer', 'difficulty', 'xp', 'explanation', 'nova_feedback', 'order_index']
+
+
+class ConceptQuestionSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ConceptQuestion
+        fields = [
+            'id', 'question_type', 'question_text', 'options', 'correct_answer',
+            'difficulty', 'marks_or_xp', 'explanation', 'nova_feedback', 'order_index'
+        ]
+
+
+class ConceptSerializer(serializers.ModelSerializer):
+    packages_count = serializers.SerializerMethodField()
+    available_themes = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Concept
+        fields = ['id', 'topic_id', 'name', 'slug', 'learning_objective', 'order_index', 'packages_count', 'available_themes']
+
+    def get_packages_count(self, obj):
+        return obj.packages.count()
+
+    def get_available_themes(self, obj):
+        return list(obj.packages.values_list('theme__name', flat=True))
+
+
+class ConceptPackageListSerializer(serializers.ModelSerializer):
+    concept_name = serializers.CharField(source='concept.name', read_only=True)
+    topic_name = serializers.CharField(source='concept.topic.name', read_only=True)
+    subject_name = serializers.CharField(source='concept.topic.subject.name', read_only=True)
+    grade = serializers.CharField(source='concept.topic.grade_level', read_only=True)
+    board = serializers.CharField(source='concept.topic.board', read_only=True)
+    theme = serializers.SerializerMethodField()
+    question_count = serializers.SerializerMethodField()
+
+    class Meta:
+        model = ConceptPackage
+        fields = [
+            'id', 'concept_id', 'concept_name', 'topic_name', 'subject_name',
+            'grade', 'board', 'theme', 'content_type', 'is_published',
+            'question_count', 'created_at', 'updated_at'
+        ]
+
+    def get_theme(self, obj):
+        return obj.theme.name if obj.theme else ''
+
+    def get_question_count(self, obj):
+        segregated_count = (
+            obj.cfu_questions.count() +
+            obj.test_questions.count() +
+            obj.battle_questions.count() +
+            obj.challenge_questions.count()
+        )
+        legacy_count = obj.questions.count()
+        return max(segregated_count, legacy_count)

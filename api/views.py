@@ -7,16 +7,19 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import AllowAny, IsAuthenticated
 
+from django.utils.text import slugify
+
 from api.models import (
     Parent, Student, Interest, StudentInterest, Goal, StudentGoal,
-    OnboardingStep, Subject, SubjectGradeAvailability, StudentSubjectUnlock,
+    OnboardingStep, Curriculum, Theme, Subject, SubjectGradeAvailability, StudentSubjectUnlock,
     Topic, TopicJourneyMeta, StudentTopicProgress, CompanionActivity,
     StudentCompanionActivityLog, TopicTier, Mission, MissionProgress,
     Test, TestQuestion, TestAttempt, TestAttemptAnswer, ExtraLearningRecommendation,
-    Challenge, ChallengeOpponent, ChallengeBattle, JourneyMilestone,
+    Challenge, ChallengeQuestion, ChallengeOpponent, ChallengeBattle, JourneyMilestone,
     StudentJourneyProgress, StudentCard, NovaInteraction, AvatarCharacter,
     AvatarCategory, AvatarItem, StudentAvatar, StudentAvatarUnlock, StudentStat,
-    MissionRecommendation
+    MissionRecommendation, Concept, ConceptPackage, LearningContent,
+    CheckForUnderstandingQuestion, ConceptTestQuestion, BattleQuestion, ConceptQuestion
 )
 from api.serializers import (
     ParentSerializer, ParentSignupSerializer, ParentLoginSerializer,
@@ -24,7 +27,10 @@ from api.serializers import (
     AvatarCharacterSerializer, AvatarItemSerializer, SaveAvatarSerializer,
     SetInterestsSerializer, SetGoalsSerializer, SubjectSerializer, TopicSerializer,
     MissionSerializer, TestSerializer, TestQuestionSerializer, ChallengeSerializer,
-    ChallengeOpponentSerializer, StudentCardSerializer
+    ChallengeOpponentSerializer, StudentCardSerializer, CurriculumSerializer,
+    ThemeSerializer, LearningContentSerializer, CheckForUnderstandingQuestionSerializer,
+    ConceptTestQuestionSerializer, BattleQuestionSerializer, ChallengeQuestionSerializer,
+    ConceptSerializer, ConceptPackageListSerializer, ConceptQuestionSerializer
 )
 
 
@@ -943,3 +949,861 @@ class StudentCardsView(APIView):
         student = Student.objects.get(id=studentId)
         cards = StudentCard.objects.filter(student=student).order_by('-earned_at')
         return Response({"cards": StudentCardSerializer(cards, many=True).data})
+
+
+# --- CURRICULUM & CONTENT STUDIO INGESTION ---
+
+# --- CURRICULUM & CONTENT STUDIO INGESTION ---
+
+class AdminContentFeedView(APIView):
+    """
+    Ingests full curriculum content packages produced by Kidsverse Content Studio.
+    Segregates content cleanly into dedicated relational tables:
+    - Curriculum (board, grade)
+    - Subject (linked to Curriculum)
+    - Topic (linked to Subject and Curriculum)
+    - Concept (linked to Topic)
+    - Theme (name, slug)
+    - ConceptPackage (binds Concept and Theme)
+    - LearningContent (teaching method, image, hints, scripts)
+    - CheckForUnderstandingQuestion (CFU questions)
+    - ConceptTestQuestion (Test questions)
+    - BattleQuestion (Battle questions)
+    - Challenge & ChallengeQuestion (Challenge questions)
+    Also synchronizes playable Missions, Tests, and Challenges.
+    """
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        payload = request.data
+        if not isinstance(payload, dict):
+            return Response({"error": "Invalid payload format. Expected a JSON object."}, status=status.HTTP_400_BAD_REQUEST)
+
+        curriculum = payload.get('curriculum', {})
+        concept_data = payload.get('concept', {})
+
+        grade = curriculum.get('grade')
+        board = curriculum.get('board', 'CBSE')
+        subject_name = curriculum.get('subject')
+        topic_name = curriculum.get('topic')
+        concept_name = concept_data.get('name')
+
+        if not (grade and subject_name and topic_name and concept_name):
+            return Response({
+                "error": "Missing required curriculum fields. 'grade', 'subject', 'topic', and 'concept.name' are required."
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        # 1. Curriculum
+        curriculum_code = f"{slugify(board)}-{slugify(grade)}"
+        curriculum_obj, _ = Curriculum.objects.get_or_create(
+            board=board,
+            grade=grade,
+            defaults={
+                'name': f"{board} - {grade}",
+                'code': curriculum_code,
+                'is_active': True
+            }
+        )
+
+        # 2. Subject
+        subject_slug = slugify(subject_name)
+        subject, _ = Subject.objects.get_or_create(
+            slug=subject_slug,
+            defaults={'name': subject_name, 'curriculum': curriculum_obj, 'is_active': True}
+        )
+        if not subject.curriculum:
+            subject.curriculum = curriculum_obj
+            subject.save(update_fields=['curriculum'])
+        subject.curricula.add(curriculum_obj)
+
+        SubjectGradeAvailability.objects.get_or_create(
+            subject=subject,
+            grade=grade,
+            defaults={'is_unlocked_default': True}
+        )
+
+        # 3. Topic
+        topic_slug = slugify(topic_name)
+        topic, _ = Topic.objects.get_or_create(
+            subject=subject,
+            board=board,
+            grade_level=grade,
+            slug=topic_slug,
+            defaults={'name': topic_name, 'curriculum': curriculum_obj}
+        )
+        if not topic.curriculum:
+            topic.curriculum = curriculum_obj
+            topic.save(update_fields=['curriculum'])
+
+        # 4. Concept
+        concept_slug = slugify(concept_name)
+        learning_objective = concept_data.get('learning_objective', '')
+        concept, _ = Concept.objects.update_or_create(
+            topic=topic,
+            slug=concept_slug,
+            defaults={
+                'name': concept_name,
+                'learning_objective': learning_objective
+            }
+        )
+
+        # 5. Theme
+        theme_name = payload.get('theme_interest', 'Everyday Life')
+        theme_slug = slugify(theme_name)
+        theme_obj, _ = Theme.objects.get_or_create(
+            slug=theme_slug,
+            defaults={'name': theme_name, 'is_active': True}
+        )
+
+        # 6. Concept Package
+        content_type = payload.get('content_type', 'concept_package')
+        learning_content = payload.get('learning_content', {})
+        cfu_data = payload.get('check_for_understanding', [])
+
+        package, _ = ConceptPackage.objects.update_or_create(
+            concept=concept,
+            theme=theme_obj,
+            defaults={
+                'content_type': content_type,
+                'teaching_method': learning_content.get('teaching_method', ''),
+                'explanation': learning_content.get('explanation', ''),
+                'image_url': learning_content.get('image_url', ''),
+                'image_prompt': learning_content.get('image_prompt', ''),
+                'hints': learning_content.get('hints', []),
+                'nova_script': learning_content.get('nova_script', ''),
+                'nova_feedback': learning_content.get('nova_feedback', ''),
+                'check_for_understanding': cfu_data,
+                'raw_payload': payload,
+                'is_published': True,
+            }
+        )
+
+        # 7. Segregated LearningContent Table
+        learning_obj, _ = LearningContent.objects.update_or_create(
+            package=package,
+            defaults={
+                'concept': concept,
+                'theme': theme_obj,
+                'teaching_method': learning_content.get('teaching_method', ''),
+                'explanation': learning_content.get('explanation', ''),
+                'image_url': learning_content.get('image_url', ''),
+                'image_prompt': learning_content.get('image_prompt', ''),
+                'hints': learning_content.get('hints', []),
+                'nova_script': learning_content.get('nova_script', ''),
+                'nova_feedback': learning_content.get('nova_feedback', ''),
+            }
+        )
+
+        # 8. Segregated CheckForUnderstandingQuestion Table
+        package.cfu_questions.all().delete()
+        for idx, q in enumerate(cfu_data, 1):
+            CheckForUnderstandingQuestion.objects.create(
+                package=package,
+                learning_content=learning_obj,
+                question_text=q.get('question', ''),
+                options=q.get('options', []),
+                correct_answer=q.get('answer', ''),
+                difficulty=q.get('difficulty', 'Easy'),
+                explanation=q.get('explanation', ''),
+                order_index=idx
+            )
+
+        # 9. Segregated ConceptTestQuestion Table
+        test_questions_data = payload.get('test_questions', {})
+        test_is_one_time = False
+        if isinstance(test_questions_data, dict):
+            test_is_one_time = test_questions_data.get('one_time', False)
+            test_q_list = test_questions_data.get('questions', [])
+        else:
+            test_q_list = test_questions_data or []
+
+        package.test_questions.all().delete()
+        for idx, q in enumerate(test_q_list, 1):
+            marks = q.get('marks')
+            try:
+                marks = int(marks) if marks is not None else 1
+            except (ValueError, TypeError):
+                marks = 1
+            ConceptTestQuestion.objects.create(
+                package=package,
+                concept=concept,
+                topic=topic,
+                question_text=q.get('question', ''),
+                options=q.get('options', []),
+                correct_answer=q.get('answer', ''),
+                difficulty=q.get('difficulty', 'Medium'),
+                marks=marks,
+                explanation=q.get('explanation', ''),
+                is_one_time=test_is_one_time,
+                order_index=idx
+            )
+
+        # Synchronize with Test & TestQuestion for student testing flow
+        topic_test, _ = Test.objects.get_or_create(
+            topic=topic,
+            slug=f"{concept.slug}-test",
+            defaults={
+                'name': f"{concept.name} Test",
+                'intro_text': f"Practice test for {concept.name}"
+            }
+        )
+        for idx, q in enumerate(test_q_list, 1):
+            marks = q.get('marks', 1)
+            try:
+                marks = int(marks) if marks is not None else 1
+            except (ValueError, TypeError):
+                marks = 1
+            TestQuestion.objects.update_or_create(
+                test=topic_test,
+                order_index=idx,
+                defaults={
+                    'question_text': q.get('question', ''),
+                    'question_type': 'mcq',
+                    'options': q.get('options', []),
+                    'correct_answer': q.get('answer', ''),
+                    'points': marks
+                }
+            )
+
+        # 10. Segregated BattleQuestion Table
+        battle_q_list = payload.get('battle_questions', [])
+        package.battle_questions.all().delete()
+        for idx, q in enumerate(battle_q_list, 1):
+            xp = q.get('xp')
+            try:
+                xp = int(xp) if xp is not None else 20
+            except (ValueError, TypeError):
+                xp = 20
+            BattleQuestion.objects.create(
+                package=package,
+                concept=concept,
+                topic=topic,
+                question_text=q.get('question', ''),
+                options=q.get('options', []),
+                correct_answer=q.get('answer', ''),
+                difficulty=q.get('difficulty', 'Hard'),
+                xp=xp,
+                explanation=q.get('explanation', ''),
+                order_index=idx
+            )
+
+        # 11. Segregated Challenge & ChallengeQuestion Table
+        challenge_data = payload.get('challenge', {})
+        challenge_is_one_time = False
+        if isinstance(challenge_data, dict):
+            challenge_is_one_time = challenge_data.get('one_time', False)
+            challenge_q_list = challenge_data.get('questions', [])
+        else:
+            challenge_q_list = challenge_data or []
+
+        challenge_slug = f"{topic.slug}-{concept.slug}-challenge"
+        challenge_obj, _ = Challenge.objects.update_or_create(
+            slug=challenge_slug,
+            defaults={
+                'topic': topic,
+                'package': package,
+                'concept': concept,
+                'name': f"{concept.name} Challenge",
+                'description': f"Boss challenge battle for {concept.name}",
+                'is_one_time': challenge_is_one_time
+            }
+        )
+
+        package.challenge_questions.all().delete()
+        for idx, q in enumerate(challenge_q_list, 1):
+            xp = q.get('xp')
+            try:
+                xp = int(xp) if xp is not None else 35
+            except (ValueError, TypeError):
+                xp = 35
+            ChallengeQuestion.objects.create(
+                challenge=challenge_obj,
+                package=package,
+                concept=concept,
+                question_text=q.get('question', ''),
+                options=q.get('options', []),
+                correct_answer=q.get('answer', ''),
+                difficulty=q.get('difficulty', 'Hard'),
+                xp=xp,
+                explanation=q.get('explanation', ''),
+                nova_feedback=q.get('nova_feedback', ''),
+                order_index=idx
+            )
+
+        # 12. Populate legacy ConceptQuestion for backward compatibility
+        package.questions.all().delete()
+        for idx, q in enumerate(cfu_data, 1):
+            ConceptQuestion.objects.create(
+                package=package,
+                question_type='cfu',
+                question_text=q.get('question', ''),
+                options=q.get('options', []),
+                correct_answer=q.get('answer', ''),
+                difficulty=q.get('difficulty', 'Easy'),
+                explanation=q.get('explanation', ''),
+                order_index=idx
+            )
+        for idx, q in enumerate(test_q_list, 1):
+            marks = q.get('marks')
+            try:
+                marks = int(marks) if marks is not None else 1
+            except (ValueError, TypeError):
+                marks = 1
+            ConceptQuestion.objects.create(
+                package=package,
+                question_type='test',
+                question_text=q.get('question', ''),
+                options=q.get('options', []),
+                correct_answer=q.get('answer', ''),
+                difficulty=q.get('difficulty', 'Medium'),
+                marks_or_xp=marks,
+                explanation=q.get('explanation', ''),
+                order_index=idx
+            )
+        for idx, q in enumerate(battle_q_list, 1):
+            xp = q.get('xp')
+            try:
+                xp = int(xp) if xp is not None else 20
+            except (ValueError, TypeError):
+                xp = 20
+            ConceptQuestion.objects.create(
+                package=package,
+                question_type='battle',
+                question_text=q.get('question', ''),
+                options=q.get('options', []),
+                correct_answer=q.get('answer', ''),
+                difficulty=q.get('difficulty', 'Hard'),
+                marks_or_xp=xp,
+                explanation=q.get('explanation', ''),
+                order_index=idx
+            )
+        for idx, q in enumerate(challenge_q_list, 1):
+            xp = q.get('xp')
+            try:
+                xp = int(xp) if xp is not None else 35
+            except (ValueError, TypeError):
+                xp = 35
+            ConceptQuestion.objects.create(
+                package=package,
+                question_type='challenge',
+                question_text=q.get('question', ''),
+                options=q.get('options', []),
+                correct_answer=q.get('answer', ''),
+                difficulty=q.get('difficulty', 'Hard'),
+                marks_or_xp=xp,
+                explanation=q.get('explanation', ''),
+                nova_feedback=q.get('nova_feedback', ''),
+                order_index=idx
+            )
+
+        # 13. Synchronize Mission so student learning path immediately reflects this concept
+        tier, _ = TopicTier.objects.get_or_create(
+            topic=topic,
+            tier_key='school_syllabus',
+            defaults={'label': 'School Syllabus', 'order_index': 1, 'required_plan': 'free'}
+        )
+        mission, _ = Mission.objects.update_or_create(
+            topic=topic,
+            slug=concept_slug,
+            defaults={
+                'tier': tier,
+                'concept': concept,
+                'name': concept.name,
+                'xp_reward': 30,
+                'content': {
+                    'type': 'concept_package',
+                    'theme': theme_obj.name,
+                    'teaching_method': package.teaching_method,
+                    'explanation': package.explanation,
+                    'image_url': package.image_url,
+                    'hints': package.hints,
+                    'nova_script': package.nova_script,
+                    'check_for_understanding': package.check_for_understanding,
+                }
+            }
+        )
+
+        total_questions = len(cfu_data) + len(test_q_list) + len(battle_q_list) + len(challenge_q_list)
+
+        return Response({
+            "status": "success",
+            "message": "Content package successfully ingested and segregated into relational tables",
+            "data": {
+                "curriculum_id": str(curriculum_obj.id),
+                "curriculum": curriculum_obj.name,
+                "subject_id": str(subject.id),
+                "subject": subject.name,
+                "board": topic.board,
+                "grade": topic.grade_level,
+                "topic_id": str(topic.id),
+                "topic": topic.name,
+                "concept_id": str(concept.id),
+                "concept": concept.name,
+                "theme_id": str(theme_obj.id),
+                "theme": theme_obj.name,
+                "package_id": str(package.id),
+                "learning_content_id": str(learning_obj.id),
+                "mission_id": str(mission.id),
+                "test_id": str(topic_test.id),
+                "challenge_id": str(challenge_obj.id),
+                "questions_saved": {
+                    "cfu": len(cfu_data),
+                    "test": len(test_q_list),
+                    "battle": len(battle_q_list),
+                    "challenge": len(challenge_q_list),
+                    "total": total_questions
+                }
+            }
+        }, status=status.HTTP_201_CREATED)
+
+
+class AdminContentPackageListView(APIView):
+    """
+    List all ingested concept packages with filtering options.
+    Filter params: ?grade=...&board=...&subject=...&topic=...&theme=...&curriculum_id=...
+    """
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        qs = ConceptPackage.objects.select_related('concept__topic__subject', 'theme').all().order_by('-created_at')
+
+        grade = request.query_params.get('grade')
+        board = request.query_params.get('board')
+        subject = request.query_params.get('subject')
+        topic = request.query_params.get('topic')
+        theme = request.query_params.get('theme')
+        curriculum_id = request.query_params.get('curriculum_id')
+
+        if grade:
+            qs = qs.filter(concept__topic__grade_level__iexact=grade)
+        if board:
+            qs = qs.filter(concept__topic__board__iexact=board)
+        if subject:
+            qs = qs.filter(concept__topic__subject__name__icontains=subject)
+        if topic:
+            qs = qs.filter(concept__topic__name__icontains=topic)
+        if theme:
+            qs = qs.filter(theme__name__iexact=theme)
+        if curriculum_id:
+            qs = qs.filter(concept__topic__curriculum_id=curriculum_id)
+
+        serializer = ConceptPackageListSerializer(qs, many=True)
+        return Response({"packages": serializer.data, "count": qs.count()})
+
+
+class AdminContentPackageDetailView(APIView):
+    """
+    Retrieves an individual package by querying the segregated tables and
+    formatting the result to match the Kidsverse Content Studio schema.
+    """
+    permission_classes = [AllowAny]
+
+    def get(self, request, packageId):
+        package = ConceptPackage.objects.select_related(
+            'concept__topic__subject', 'concept__topic__curriculum', 'theme'
+        ).filter(id=packageId).first()
+        if not package:
+            return Response({"error": "Package not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        concept = package.concept
+        topic = concept.topic
+        subject = topic.subject
+        theme = package.theme
+
+        learning_content_obj = getattr(package, 'learning_content', None)
+
+        cfu_questions = [
+            {
+                "question": q.question_text,
+                "options": q.options,
+                "answer": q.correct_answer,
+                "difficulty": q.difficulty,
+                "explanation": q.explanation
+            }
+            for q in package.cfu_questions.all().order_by('order_index')
+        ]
+        if not cfu_questions:
+            cfu_questions = [
+                {
+                    "question": q.question_text,
+                    "options": q.options,
+                    "answer": q.correct_answer,
+                    "difficulty": q.difficulty,
+                    "explanation": q.explanation
+                }
+                for q in package.questions.filter(question_type='cfu').order_by('order_index')
+            ]
+
+        test_questions = [
+            {
+                "question": q.question_text,
+                "options": q.options,
+                "answer": q.correct_answer,
+                "difficulty": q.difficulty,
+                "marks": q.marks,
+                "explanation": q.explanation
+            }
+            for q in package.test_questions.all().order_by('order_index')
+        ]
+        if not test_questions:
+            test_questions = [
+                {
+                    "question": q.question_text,
+                    "options": q.options,
+                    "answer": q.correct_answer,
+                    "difficulty": q.difficulty,
+                    "marks": q.marks_or_xp,
+                    "explanation": q.explanation
+                }
+                for q in package.questions.filter(question_type='test').order_by('order_index')
+            ]
+
+        battle_questions = [
+            {
+                "question": q.question_text,
+                "options": q.options,
+                "answer": q.correct_answer,
+                "difficulty": q.difficulty,
+                "xp": q.xp,
+                "explanation": q.explanation
+            }
+            for q in package.battle_questions.all().order_by('order_index')
+        ]
+        if not battle_questions:
+            battle_questions = [
+                {
+                    "question": q.question_text,
+                    "options": q.options,
+                    "answer": q.correct_answer,
+                    "difficulty": q.difficulty,
+                    "xp": q.marks_or_xp,
+                    "explanation": q.explanation
+                }
+                for q in package.questions.filter(question_type='battle').order_by('order_index')
+            ]
+
+        challenge_questions = [
+            {
+                "question": q.question_text,
+                "options": q.options,
+                "answer": q.correct_answer,
+                "difficulty": q.difficulty,
+                "xp": q.xp,
+                "explanation": q.explanation,
+                "nova_feedback": q.nova_feedback
+            }
+            for q in package.challenge_questions.all().order_by('order_index')
+        ]
+        if not challenge_questions:
+            challenge_questions = [
+                {
+                    "question": q.question_text,
+                    "options": q.options,
+                    "answer": q.correct_answer,
+                    "difficulty": q.difficulty,
+                    "xp": q.marks_or_xp,
+                    "explanation": q.explanation,
+                    "nova_feedback": q.nova_feedback
+                }
+                for q in package.questions.filter(question_type='challenge').order_by('order_index')
+            ]
+
+        teaching_method = learning_content_obj.teaching_method if learning_content_obj else package.teaching_method
+        image_url = learning_content_obj.image_url if learning_content_obj else package.image_url
+        image_prompt = learning_content_obj.image_prompt if learning_content_obj else package.image_prompt
+        explanation = learning_content_obj.explanation if learning_content_obj else package.explanation
+        hints = learning_content_obj.hints if learning_content_obj else package.hints
+        nova_script = learning_content_obj.nova_script if learning_content_obj else package.nova_script
+        nova_feedback = learning_content_obj.nova_feedback if learning_content_obj else package.nova_feedback
+
+        return Response({
+            "id": str(package.id),
+            "curriculum": {
+                "id": str(topic.curriculum_id) if topic.curriculum_id else None,
+                "grade": topic.grade_level,
+                "board": topic.board,
+                "subject": subject.name,
+                "topic": topic.name
+            },
+            "concept": {
+                "id": str(concept.id),
+                "name": concept.name,
+                "learning_objective": concept.learning_objective
+            },
+            "theme_interest": theme.name if theme else '',
+            "content_type": package.content_type,
+            "learning_content": {
+                "id": str(learning_content_obj.id) if learning_content_obj else None,
+                "teaching_method": teaching_method,
+                "image_url": image_url,
+                "image_prompt": image_prompt,
+                "explanation": explanation,
+                "hints": hints,
+                "nova_script": nova_script,
+                "nova_feedback": nova_feedback
+            },
+            "check_for_understanding": cfu_questions,
+            "test_questions": {
+                "one_time": False,
+                "questions": test_questions
+            },
+            "battle_questions": battle_questions,
+            "challenge": {
+                "one_time": False,
+                "questions": challenge_questions
+            },
+            "created_at": package.created_at.isoformat(),
+            "updated_at": package.updated_at.isoformat()
+        })
+
+
+class CurriculumTreeView(APIView):
+    """
+    Returns the full curriculum tree (Grade + Board + Subject -> Topics -> Concepts)
+    to dynamically populate curriculum dropdowns in the authoring portal.
+    """
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        grade = request.query_params.get('grade')
+        board = request.query_params.get('board')
+        subject_query = request.query_params.get('subject')
+        curriculum_id = request.query_params.get('curriculum_id')
+
+        topics_qs = Topic.objects.select_related('subject', 'curriculum').prefetch_related('concepts__packages__theme').all()
+        if grade:
+            topics_qs = topics_qs.filter(grade_level__iexact=grade)
+        if board:
+            topics_qs = topics_qs.filter(board__iexact=board)
+        if subject_query:
+            topics_qs = topics_qs.filter(subject__name__icontains=subject_query)
+        if curriculum_id:
+            topics_qs = topics_qs.filter(curriculum_id=curriculum_id)
+
+        topics_data = []
+        for t in topics_qs.order_by('order_index'):
+            concepts_data = []
+            for c in t.concepts.all().order_by('order_index'):
+                themes = list(c.packages.values_list('theme__name', flat=True))
+                concepts_data.append({
+                    "id": str(c.id),
+                    "name": c.name,
+                    "slug": c.slug,
+                    "objective": c.learning_objective,
+                    "available_themes": themes
+                })
+
+            topics_data.append({
+                "id": str(t.id),
+                "curriculum_id": str(t.curriculum_id) if t.curriculum_id else None,
+                "name": t.name,
+                "slug": t.slug,
+                "subject": t.subject.name,
+                "grade": t.grade_level,
+                "board": t.board,
+                "concepts": concepts_data
+            })
+
+        return Response({
+            "filter": {"grade": grade, "board": board, "subject": subject_query, "curriculum_id": curriculum_id},
+            "count": len(topics_data),
+            "topics": topics_data
+        })
+
+
+class CurriculumListView(APIView):
+    """
+    List all Curriculums or create a new Curriculum.
+    """
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        board = request.query_params.get('board')
+        grade = request.query_params.get('grade')
+        qs = Curriculum.objects.all().order_by('board', 'grade')
+        if board:
+            qs = qs.filter(board__iexact=board)
+        if grade:
+            qs = qs.filter(grade__iexact=grade)
+
+        serializer = CurriculumSerializer(qs, many=True)
+        return Response({"curriculums": serializer.data, "count": qs.count()})
+
+    def post(self, request):
+        board = request.data.get('board')
+        grade = request.data.get('grade')
+        name = request.data.get('name') or f"{board} - {grade}"
+        description = request.data.get('description', '')
+
+        if not (board and grade):
+            return Response({"error": "'board' and 'grade' are required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        code = f"{slugify(board)}-{slugify(grade)}"
+        curriculum, created = Curriculum.objects.get_or_create(
+            board=board,
+            grade=grade,
+            defaults={'name': name, 'code': code, 'description': description}
+        )
+        if not created and description:
+            curriculum.description = description
+            curriculum.save(update_fields=['description'])
+
+        serializer = CurriculumSerializer(curriculum)
+        return Response({
+            "status": "success",
+            "curriculum": serializer.data
+        }, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
+
+
+class CurriculumDetailView(APIView):
+    """
+    Retrieve Curriculum detail including its subjects and topics.
+    """
+    permission_classes = [AllowAny]
+
+    def get(self, request, curriculumId):
+        curriculum = Curriculum.objects.prefetch_related('subjects', 'topics').filter(id=curriculumId).first()
+        if not curriculum:
+            return Response({"error": "Curriculum not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        subjects_data = [
+            {
+                "id": str(s.id),
+                "name": s.name,
+                "slug": s.slug,
+                "order_index": s.order_index,
+                "is_active": s.is_active
+            }
+            for s in curriculum.subjects.all()
+        ]
+        topics_data = [
+            {
+                "id": str(t.id),
+                "name": t.name,
+                "slug": t.slug,
+                "subject": t.subject.name,
+                "concepts_count": t.concepts.count()
+            }
+            for t in curriculum.topics.all()
+        ]
+
+        return Response({
+            "id": str(curriculum.id),
+            "name": curriculum.name,
+            "code": curriculum.code,
+            "board": curriculum.board,
+            "grade": curriculum.grade,
+            "description": curriculum.description,
+            "is_active": curriculum.is_active,
+            "subjects": subjects_data,
+            "topics": topics_data
+        })
+
+
+class CurriculumSubjectCreateView(APIView):
+    """
+    Add a Subject to a Curriculum.
+    """
+    permission_classes = [AllowAny]
+
+    def post(self, request, curriculumId):
+        curriculum = Curriculum.objects.filter(id=curriculumId).first()
+        if not curriculum:
+            return Response({"error": "Curriculum not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        name = request.data.get('name')
+        if not name:
+            return Response({"error": "'name' is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        slug = slugify(name)
+        subject, _ = Subject.objects.get_or_create(
+            slug=slug,
+            defaults={'name': name, 'curriculum': curriculum}
+        )
+        subject.curricula.add(curriculum)
+        if not subject.curriculum:
+            subject.curriculum = curriculum
+            subject.save(update_fields=['curriculum'])
+
+        SubjectGradeAvailability.objects.get_or_create(
+            subject=subject,
+            grade=curriculum.grade,
+            defaults={'is_unlocked_default': True}
+        )
+
+        return Response({
+            "status": "success",
+            "subject": {
+                "id": str(subject.id),
+                "name": subject.name,
+                "slug": subject.slug,
+                "curriculum_id": str(curriculum.id)
+            }
+        }, status=status.HTTP_201_CREATED)
+
+
+class TopicConceptCreateView(APIView):
+    """
+    Add a Concept to a Topic.
+    """
+    permission_classes = [AllowAny]
+
+    def post(self, request, topicId):
+        topic = Topic.objects.filter(id=topicId).first()
+        if not topic:
+            return Response({"error": "Topic not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        name = request.data.get('name')
+        learning_objective = request.data.get('learning_objective', '')
+        if not name:
+            return Response({"error": "'name' is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        concept, created = Concept.objects.get_or_create(
+            topic=topic,
+            slug=slugify(name),
+            defaults={'name': name, 'learning_objective': learning_objective}
+        )
+
+        return Response({
+            "status": "success",
+            "concept": {
+                "id": str(concept.id),
+                "name": concept.name,
+                "slug": concept.slug,
+                "topic_id": str(topic.id),
+                "learning_objective": concept.learning_objective
+            }
+        }, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
+
+
+class ThemeListView(APIView):
+    """
+    List all Themes or create a new Theme.
+    """
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        themes = Theme.objects.filter(is_active=True).order_by('order_index')
+        serializer = ThemeSerializer(themes, many=True)
+        return Response({"themes": serializer.data, "count": themes.count()})
+
+    def post(self, request):
+        name = request.data.get('name')
+        if not name:
+            return Response({"error": "'name' is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        slug = slugify(name)
+        theme, created = Theme.objects.get_or_create(
+            slug=slug,
+            defaults={
+                'name': name,
+                'description': request.data.get('description', ''),
+                'icon_asset': request.data.get('icon_asset', '')
+            }
+        )
+        serializer = ThemeSerializer(theme)
+        return Response({
+            "status": "success",
+            "theme": serializer.data
+        }, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
+
