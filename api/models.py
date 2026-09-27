@@ -7,6 +7,7 @@ class Parent(models.Model):
     email = models.EmailField(max_length=255, unique=True)
     phone = models.CharField(max_length=20, null=True, blank=True)
     password_hash = models.TextField()
+    pin_hash = models.TextField(null=True, blank=True)
     full_name = models.CharField(max_length=255, null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -33,6 +34,7 @@ class Student(models.Model):
     name = models.CharField(max_length=255)
     grade = models.CharField(max_length=20, null=True, blank=True)
     board = models.CharField(max_length=50, null=True, blank=True)
+    curriculum = models.ForeignKey('Curriculum', on_delete=models.SET_NULL, null=True, blank=True, related_name='students')
     onboarding_completed_at = models.DateTimeField(null=True, blank=True)
     is_active = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -107,6 +109,33 @@ class OnboardingStep(models.Model):
     class Meta:
         db_table = 'onboarding_steps'
         unique_together = ('student', 'step_key')
+
+
+class PasswordResetRequest(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    parent = models.ForeignKey(Parent, on_delete=models.CASCADE, related_name='password_reset_requests')
+    requested_at = models.DateTimeField(auto_now_add=True)
+    expires_at = models.DateTimeField()
+    completed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = 'password_reset_requests'
+
+
+class ParentVerificationChallenge(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    parent = models.ForeignKey(Parent, on_delete=models.CASCADE, related_name='verification_challenges')
+    student = models.ForeignKey(Student, on_delete=models.CASCADE, related_name='parent_verification_challenges')
+    full_name = models.CharField(max_length=255)
+    relationship = models.CharField(max_length=100)
+    phone = models.CharField(max_length=20)
+    code_hash = models.TextField()
+    expires_at = models.DateTimeField()
+    verified_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'parent_verification_challenges'
 
 
 class Curriculum(models.Model):
@@ -242,6 +271,7 @@ class ConceptPackage(models.Model):
     hints = models.JSONField(default=list, blank=True)
     nova_script = models.TextField(null=True, blank=True)
     nova_feedback = models.TextField(null=True, blank=True)
+    learn_before_test = models.JSONField(default=dict, blank=True)
     check_for_understanding = models.JSONField(default=list, blank=True)
     raw_payload = models.JSONField(null=True, blank=True)
     is_published = models.BooleanField(default=True)
@@ -268,6 +298,7 @@ class LearningContent(models.Model):
     hints = models.JSONField(default=list, blank=True)
     nova_script = models.TextField(null=True, blank=True)
     nova_feedback = models.TextField(null=True, blank=True)
+    learn_before_test = models.JSONField(default=dict, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -276,6 +307,31 @@ class LearningContent(models.Model):
 
     def __str__(self):
         return f"LearningContent: {self.package}"
+
+
+class LearnBeforeTestStep(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    package = models.ForeignKey(ConceptPackage, on_delete=models.CASCADE, related_name='learn_steps')
+    learning_content = models.ForeignKey(LearningContent, on_delete=models.CASCADE, null=True, blank=True, related_name='learn_steps')
+    concept = models.ForeignKey(Concept, on_delete=models.CASCADE, null=True, blank=True, related_name='learn_steps')
+    step_key = models.CharField(max_length=50)  # 'understand', 'example', 'remember'
+    title = models.CharField(max_length=255)
+    teaching_text = models.TextField(null=True, blank=True)
+    key_idea = models.TextField(null=True, blank=True)
+    image_url = models.TextField(null=True, blank=True)
+    image_prompt = models.TextField(null=True, blank=True)
+    nova_script = models.TextField(null=True, blank=True)
+    mini_question = models.JSONField(default=dict, blank=True)  # {question, options, answer, explanation}
+    order_index = models.IntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'learn_before_test_steps'
+        ordering = ['order_index']
+
+    def __str__(self):
+        return f"[{self.step_key.upper()}] {self.title}"
 
 
 class CheckForUnderstandingQuestion(models.Model):
@@ -787,6 +843,25 @@ class StudentStat(models.Model):
 
     class Meta:
         db_table = 'student_stats'
+
+
+class StudentSettings(models.Model):
+    student = models.OneToOneField(Student, on_delete=models.CASCADE, primary_key=True, related_name='settings')
+    values = models.JSONField(default=dict, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'student_settings'
+
+
+class StudentBreakPass(models.Model):
+    student = models.OneToOneField(Student, on_delete=models.CASCADE, primary_key=True, related_name='break_passes')
+    available_count = models.PositiveIntegerField(default=3)
+    used_count = models.PositiveIntegerField(default=0)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'student_break_passes'
 
 
 class MissionRecommendation(models.Model):

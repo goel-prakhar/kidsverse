@@ -7,7 +7,7 @@ from api.models import (
     ExtraLearningRecommendation, Challenge, ChallengeOpponent, ChallengeBattle,
     JourneyMilestone, StudentJourneyProgress, StudentCard, NovaInteraction,
     AvatarCharacter, AvatarCategory, AvatarItem, StudentAvatar, StudentStat,
-    Concept, ConceptPackage, LearningContent, CheckForUnderstandingQuestion,
+    Concept, ConceptPackage, LearningContent, LearnBeforeTestStep, CheckForUnderstandingQuestion,
     ConceptTestQuestion, BattleQuestion, ChallengeQuestion, ConceptQuestion
 )
 
@@ -22,6 +22,7 @@ class ParentSignupSerializer(serializers.Serializer):
     password = serializers.CharField(write_only=True)
     full_name = serializers.CharField(required=False, allow_blank=True)
     phone = serializers.CharField(required=False, allow_blank=True)
+    parent_pin = serializers.RegexField(r'^\d{4,8}$', required=False, write_only=True)
 
 
 class ParentLoginSerializer(serializers.Serializer):
@@ -107,7 +108,7 @@ class SubjectSerializer(serializers.ModelSerializer):
         student = self.context.get('student')
         if not student:
             return 0
-        topics = Topic.objects.filter(subject=obj)
+        topics = Topic.objects.filter(subject=obj, curriculum=student.curriculum)
         if not topics.exists():
             return 0
         completed = StudentTopicProgress.objects.filter(student=student, topic__in=topics, status='completed').count()
@@ -223,12 +224,23 @@ class ThemeSerializer(serializers.ModelSerializer):
         fields = ['id', 'name', 'slug', 'description', 'icon_asset', 'order_index', 'is_active']
 
 
+class LearnBeforeTestStepSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = LearnBeforeTestStep
+        fields = [
+            'id', 'step_key', 'title', 'teaching_text', 'key_idea',
+            'image_url', 'image_prompt', 'nova_script', 'mini_question', 'order_index'
+        ]
+
+
 class LearningContentSerializer(serializers.ModelSerializer):
+    learn_steps = LearnBeforeTestStepSerializer(many=True, read_only=True)
+
     class Meta:
         model = LearningContent
         fields = [
             'id', 'package_id', 'teaching_method', 'explanation', 'image_url',
-            'image_prompt', 'hints', 'nova_script', 'nova_feedback'
+            'image_prompt', 'hints', 'nova_script', 'nova_feedback', 'learn_before_test', 'learn_steps'
         ]
 
 
@@ -288,17 +300,21 @@ class ConceptPackageListSerializer(serializers.ModelSerializer):
     board = serializers.CharField(source='concept.topic.board', read_only=True)
     theme = serializers.SerializerMethodField()
     question_count = serializers.SerializerMethodField()
+    learn_steps_count = serializers.SerializerMethodField()
 
     class Meta:
         model = ConceptPackage
         fields = [
             'id', 'concept_id', 'concept_name', 'topic_name', 'subject_name',
             'grade', 'board', 'theme', 'content_type', 'is_published',
-            'question_count', 'created_at', 'updated_at'
+            'learn_steps_count', 'question_count', 'created_at', 'updated_at'
         ]
 
     def get_theme(self, obj):
         return obj.theme.name if obj.theme else ''
+
+    def get_learn_steps_count(self, obj):
+        return obj.learn_steps.count()
 
     def get_question_count(self, obj):
         segregated_count = (

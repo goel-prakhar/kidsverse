@@ -1,7 +1,10 @@
 import datetime
+import secrets
+from django.db.models import Count, Sum, Q
 from api.utils import hash_password, verify_password
 from api.jwt_utils import generate_jwt_token
 from django.utils import timezone
+from django.conf import settings
 from rest_framework import status
 from rest_framework.views import APIView
 from rest_framework.response import Response
@@ -11,15 +14,15 @@ from django.utils.text import slugify
 
 from api.models import (
     Parent, Student, Interest, StudentInterest, Goal, StudentGoal,
-    OnboardingStep, Curriculum, Theme, Subject, SubjectGradeAvailability, StudentSubjectUnlock,
+    OnboardingStep, PasswordResetRequest, ParentVerificationChallenge, Curriculum, Theme, Subject, SubjectGradeAvailability, StudentSubjectUnlock,
     Topic, TopicJourneyMeta, StudentTopicProgress, CompanionActivity,
     StudentCompanionActivityLog, TopicTier, Mission, MissionProgress,
     Test, TestQuestion, TestAttempt, TestAttemptAnswer, ExtraLearningRecommendation,
     Challenge, ChallengeQuestion, ChallengeOpponent, ChallengeBattle, JourneyMilestone,
     StudentJourneyProgress, StudentCard, NovaInteraction, AvatarCharacter,
     AvatarCategory, AvatarItem, StudentAvatar, StudentAvatarUnlock, StudentStat,
-    MissionRecommendation, Concept, ConceptPackage, LearningContent,
-    CheckForUnderstandingQuestion, ConceptTestQuestion, BattleQuestion, ConceptQuestion
+    MissionRecommendation, StudentSettings, StudentBreakPass, Concept, ConceptPackage, LearningContent, LearnBeforeTestStep,
+    CheckForUnderstandingQuestion, ConceptTestQuestion, BattleQuestion, ConceptQuestion, LearningEvent
 )
 from api.serializers import (
     ParentSerializer, ParentSignupSerializer, ParentLoginSerializer,
@@ -28,8 +31,9 @@ from api.serializers import (
     SetInterestsSerializer, SetGoalsSerializer, SubjectSerializer, TopicSerializer,
     MissionSerializer, TestSerializer, TestQuestionSerializer, ChallengeSerializer,
     ChallengeOpponentSerializer, StudentCardSerializer, CurriculumSerializer,
-    ThemeSerializer, LearningContentSerializer, CheckForUnderstandingQuestionSerializer,
-    ConceptTestQuestionSerializer, BattleQuestionSerializer, ChallengeQuestionSerializer,
+    ThemeSerializer, LearningContentSerializer, LearnBeforeTestStepSerializer,
+    CheckForUnderstandingQuestionSerializer, ConceptTestQuestionSerializer,
+    BattleQuestionSerializer, ChallengeQuestionSerializer,
     ConceptSerializer, ConceptPackageListSerializer, ConceptQuestionSerializer
 )
 
@@ -51,6 +55,49 @@ def update_student_xp_streak(student, xp_gained):
     return stats
 
 
+def get_student_curriculum(student):
+    if student.curriculum_id:
+        return student.curriculum
+    if not (student.board and student.grade):
+        return None
+    curr = Curriculum.objects.filter(
+        board__iexact=student.board,
+        grade__iexact=student.grade,
+        is_active=True,
+    ).first()
+    if not curr:
+        alt_grade = f"Grade {student.grade}" if not student.grade.lower().startswith("grade") else student.grade.replace("Grade", "").replace("grade", "").strip()
+        curr = Curriculum.objects.filter(
+            board__iexact=student.board,
+            grade__iexact=alt_grade,
+            is_active=True,
+        ).first()
+    return curr
+
+
+def get_student_topics(student):
+    curriculum = get_student_curriculum(student)
+    if not curriculum:
+        return Topic.objects.none()
+    alt_grade = f"Grade {curriculum.grade}" if not curriculum.grade.lower().startswith("grade") else curriculum.grade.replace("Grade", "").replace("grade", "").strip()
+    return Topic.objects.filter(
+        Q(curriculum=curriculum) |
+        Q(curriculum__board__iexact=curriculum.board, curriculum__grade__in=[curriculum.grade, alt_grade])
+    ).distinct()
+
+
+def serialize_topic_progress(student, topic):
+    progress = StudentTopicProgress.objects.filter(student=student, topic=topic).first()
+    return {
+        'id': str(topic.id),
+        'name': topic.name,
+        'slug': topic.slug,
+        'subject': topic.subject.name,
+        'status': progress.status if progress else 'locked',
+        'order_index': topic.order_index,
+    }
+
+
 # --- AUTH & PARENT ACCOUNTS ---
 
 class ParentSignupView(APIView):
@@ -68,6 +115,7 @@ class ParentSignupView(APIView):
         parent = Parent.objects.create(
             email=email,
             password_hash=hash_password(serializer.validated_data['password']),
+            pin_hash=hash_password(serializer.validated_data['parent_pin']) if serializer.validated_data.get('parent_pin') else None,
             full_name=serializer.validated_data.get('full_name', ''),
             phone=serializer.validated_data.get('phone', '')
         )
@@ -105,6 +153,27 @@ class ParentLoginView(APIView):
             "parent": ParentSerializer(parent).data,
             "token": token
         }, status=status.HTTP_200_OK)
+
+
+class ParentForgotPasswordView(APIView):
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        email = (request.data.get('email') or '').strip().lower()
+        if not email:
+            return Response({'email': ['This field is required.']}, status=status.HTTP_400_BAD_REQUEST)
+
+        parent = Parent.objects.filter(email__iexact=email).first()
+        if parent:
+            PasswordResetRequest.objects.create(
+                parent=parent,
+                expires_at=timezone.now() + datetime.timedelta(hours=1),
+            )
+
+        return Response({
+            'message': 'If this email is registered, password reset instructions will be sent.',
+            'delivery': 'not_configured',
+        })
 
 
 class ParentLogoutView(APIView):
@@ -156,8 +225,9 @@ class ParentOverviewView(APIView):
             recent_attempt = TestAttempt.objects.filter(student=s, status='completed').order_by('-completed_at').first()
             
             subjects_list = []
-            for subj in Subject.objects.filter(is_active=True):
-                topics = Topic.objects.filter(subject=subj)
+            student_topics = get_student_topics(s)
+            for subj in Subject.objects.filter(topics__in=student_topics, is_active=True).distinct():
+                topics = student_topics.filter(subject=subj)
                 if topics.exists():
                     comp = StudentTopicProgress.objects.filter(student=s, topic__in=topics, status='completed').count()
                     pct = int((comp / topics.count()) * 100)
@@ -177,6 +247,64 @@ class ParentOverviewView(APIView):
                 "recent_test_score": float(recent_attempt.score) if recent_attempt and recent_attempt.score else 0
             })
         return Response({"students": res})
+
+
+class ParentVerificationStartView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        required_fields = ('full_name', 'relationship', 'phone', 'student_id')
+        missing = [field for field in required_fields if not request.data.get(field)]
+        if missing:
+            return Response({'error': f"Missing required fields: {', '.join(missing)}"}, status=status.HTTP_400_BAD_REQUEST)
+
+        student = Student.objects.filter(id=request.data['student_id'], parent=request.parent).first()
+        if not student:
+            return Response({'error': 'Student not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        code = f'{secrets.randbelow(1000000):06d}'
+        challenge = ParentVerificationChallenge.objects.create(
+            parent=request.parent,
+            student=student,
+            full_name=request.data['full_name'].strip(),
+            relationship=request.data['relationship'].strip(),
+            phone=request.data['phone'].strip(),
+            code_hash=hash_password(code),
+            expires_at=timezone.now() + datetime.timedelta(minutes=10),
+        )
+        response = {
+            'challenge_id': str(challenge.id),
+            'expires_at': challenge.expires_at.isoformat(),
+            'delivery': 'development',
+        }
+        if settings.DEBUG:
+            response['development_code'] = code
+        return Response(response, status=status.HTTP_201_CREATED)
+
+
+class ParentVerificationVerifyView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        challenge_id = request.data.get('challenge_id')
+        code = request.data.get('code')
+        if not (challenge_id and code):
+            return Response({'error': 'challenge_id and code are required.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        challenge = ParentVerificationChallenge.objects.filter(id=challenge_id, parent=request.parent).first()
+        if not challenge:
+            return Response({'error': 'Verification challenge not found'}, status=status.HTTP_404_NOT_FOUND)
+        if challenge.verified_at:
+            return Response({'error': 'Verification challenge has already been used.'}, status=status.HTTP_400_BAD_REQUEST)
+        if challenge.expires_at < timezone.now() or not verify_password(str(code), challenge.code_hash):
+            return Response({'error': 'Invalid or expired verification code.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        challenge.verified_at = timezone.now()
+        challenge.save(update_fields=['verified_at'])
+        request.parent.full_name = challenge.full_name
+        request.parent.phone = challenge.phone
+        request.parent.save(update_fields=['full_name', 'phone'])
+        return Response({'verified': True, 'student_id': str(challenge.student_id)})
 
 
 # --- STUDENTS & ONBOARDING ---
@@ -216,10 +344,105 @@ class UpdateGradeBoardView(APIView):
 
         student.grade = serializer.validated_data['grade']
         student.board = serializer.validated_data['board']
-        student.save()
+        alt_grade = f"Grade {student.grade}" if not student.grade.lower().startswith("grade") else student.grade.replace("Grade", "").replace("grade", "").strip()
+        curriculum = Curriculum.objects.filter(
+            board__iexact=student.board,
+            grade__in=[student.grade, alt_grade],
+            is_active=True
+        ).first()
+        if not curriculum:
+            curriculum = Curriculum.objects.create(
+                board=student.board,
+                grade=student.grade,
+                name=f'{student.board} - {student.grade}',
+                code=f'{slugify(student.board)}-{slugify(student.grade)}',
+                is_active=True
+            )
+        student.curriculum = curriculum
+        student.save(update_fields=['grade', 'board', 'curriculum', 'updated_at'])
 
         OnboardingStep.objects.get_or_create(student=student, step_key='grade_board')
         return Response(StudentSerializer(student).data)
+
+
+class StudentLearningPathView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, studentId):
+        student = Student.objects.get(id=studentId)
+        curriculum = get_student_curriculum(student)
+        topics = get_student_topics(student).select_related('subject').order_by('subject__order_index', 'order_index')
+        subjects = []
+        for subject in Subject.objects.filter(topics__in=topics, is_active=True).distinct().order_by('order_index'):
+            subject_topics = [serialize_topic_progress(student, topic) for topic in topics.filter(subject=subject)]
+            subjects.append({'id': str(subject.id), 'name': subject.name, 'slug': subject.slug, 'topics': subject_topics})
+
+        return Response({
+            'student_id': str(student.id),
+            'curriculum': {
+                'id': str(curriculum.id), 'name': curriculum.name,
+                'board': curriculum.board, 'grade': curriculum.grade,
+            } if curriculum else None,
+            'subjects': subjects,
+        })
+
+
+class StudentSettingsView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, studentId):
+        student = Student.objects.get(id=studentId)
+        student_settings, _ = StudentSettings.objects.get_or_create(student=student)
+        return Response({'settings': student_settings.values, 'updated_at': student_settings.updated_at.isoformat()})
+
+    def patch(self, request, studentId):
+        student = Student.objects.get(id=studentId)
+        values = request.data.get('settings')
+        if not isinstance(values, dict):
+            return Response({'settings': ['A JSON object is required.']}, status=status.HTTP_400_BAD_REQUEST)
+        student_settings, _ = StudentSettings.objects.get_or_create(student=student)
+        student_settings.values = values
+        student_settings.save(update_fields=['values', 'updated_at'])
+        return Response({'settings': student_settings.values, 'updated_at': student_settings.updated_at.isoformat()})
+
+
+class StudentNovaMessagesView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, studentId):
+        student = Student.objects.get(id=studentId)
+        messages = NovaInteraction.objects.filter(student=student).order_by('created_at')
+        return Response({'messages': [{
+            'id': str(message.id), 'message': message.message, 'response': message.response,
+            'context': message.context, 'created_at': message.created_at.isoformat(),
+        } for message in messages]})
+
+    def post(self, request, studentId):
+        student = Student.objects.get(id=studentId)
+        message = (request.data.get('message') or '').strip()
+        topic_id = request.data.get('topic_id')
+        if not message:
+            return Response({'error': 'message is required.'}, status=status.HTTP_400_BAD_REQUEST)
+        topic = None
+        if topic_id:
+            topic = get_student_topics(student).filter(id=topic_id).first()
+            if not topic:
+                return Response({'error': 'Topic is not available in this student curriculum.'}, status=status.HTTP_404_NOT_FOUND)
+
+        if topic:
+            response_text = f"Let's explore {topic.name} together! {message}"
+            context = {'topic_id': str(topic.id)}
+        else:
+            response_text = f"Hi! I'm Nova, your learning buddy. How can I help you? You said: {message}"
+            context = {}
+
+        interaction = NovaInteraction.objects.create(
+            student=student, message=message, response=response_text, context=context,
+        )
+        return Response({
+            'id': str(interaction.id), 'message': interaction.message, 'response': interaction.response,
+            'context': interaction.context, 'created_at': interaction.created_at.isoformat(),
+        }, status=status.HTTP_201_CREATED)
 
 
 class AvatarCharactersView(APIView):
@@ -413,7 +636,7 @@ class StudentHomeView(APIView):
                 "progress_percent": 0
             }
         else:
-            first_mission = Mission.objects.first()
+            first_mission = Mission.objects.filter(topic__in=get_student_topics(student)).order_by('topic__order_index', 'order_index').first()
             if first_mission:
                 rec_data = {
                     "mission_id": str(first_mission.id),
@@ -426,7 +649,7 @@ class StudentHomeView(APIView):
                     "progress_percent": 0
                 }
 
-        subjects = Subject.objects.filter(is_active=True).order_by('order_index')
+        subjects = Subject.objects.filter(topics__in=get_student_topics(student), is_active=True).distinct().order_by('order_index')
         subj_serializer = SubjectSerializer(subjects, many=True, context={'student': student})
 
         return Response({
@@ -448,7 +671,7 @@ class StudentSubjectsView(APIView):
 
     def get(self, request, studentId):
         student = Student.objects.get(id=studentId)
-        subjects = Subject.objects.filter(is_active=True).order_by('order_index')
+        subjects = Subject.objects.filter(topics__in=get_student_topics(student), is_active=True).distinct().order_by('order_index')
         serializer = SubjectSerializer(subjects, many=True, context={'student': student})
         return Response({"subjects": serializer.data})
 
@@ -473,7 +696,9 @@ class StudentTopicDetailView(APIView):
 
     def get(self, request, studentId, topicId):
         student = Student.objects.get(id=studentId)
-        topic = Topic.objects.get(id=topicId)
+        topic = get_student_topics(student).filter(id=topicId).first()
+        if not topic:
+            return Response({'error': 'Topic is not available in this student curriculum.'}, status=status.HTTP_404_NOT_FOUND)
 
         tiers_list = []
         for tier in TopicTier.objects.filter(topic=topic).order_by('order_index'):
@@ -523,14 +748,25 @@ class MissionDetailView(APIView):
     permission_classes = [AllowAny]
 
     def get(self, request, missionId):
-        mission = Mission.objects.get(id=missionId)
+        mission = Mission.objects.filter(id=missionId).first()
+        if not mission:
+            return Response({'error': 'Mission not found'}, status=status.HTTP_404_NOT_FOUND)
+        content = dict(mission.content or {"type": "interactive_lesson", "steps": []})
+        package_id = None
+        if isinstance(content, dict) and 'package_id' in content:
+            package_id = content['package_id']
+        elif mission.concept and mission.concept.packages.exists():
+            pkg = mission.concept.packages.first()
+            package_id = str(pkg.id)
+            content['package_id'] = package_id
         return Response({
             "id": str(mission.id),
             "topic_id": str(mission.topic.id),
             "tier_key": mission.tier.tier_key,
             "name": mission.name,
             "xp_reward": mission.xp_reward,
-            "content": mission.content or {"type": "interactive_lesson", "steps": []}
+            "package_id": package_id,
+            "content": content
         })
 
 
@@ -591,6 +827,78 @@ class CompleteMissionView(APIView):
         })
 
 
+class StudentMissionReviewView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, studentId, missionId):
+        student = Student.objects.get(id=studentId)
+        mission = Mission.objects.get(id=missionId)
+        if not get_student_topics(student).filter(id=mission.topic_id).exists():
+            return Response({'error': 'Mission is not available in this student curriculum.'}, status=status.HTTP_404_NOT_FOUND)
+        progress = MissionProgress.objects.filter(student=student, mission=mission).first()
+        events = LearningEvent.objects.filter(student=student, mission=mission).order_by('created_at')
+        check_questions = []
+        if isinstance(mission.content, dict) and mission.content.get('check_for_understanding'):
+            check_questions = mission.content.get('check_for_understanding')
+        elif mission.concept and mission.concept.packages.exists():
+            pkg = mission.concept.packages.first()
+            check_questions = CheckForUnderstandingQuestionSerializer(pkg.cfu_questions.all().order_by('order_index'), many=True).data
+
+        return Response({
+            'mission': {'id': str(mission.id), 'name': mission.name, 'topic': mission.topic.name},
+            'progress': {
+                'status': progress.status if progress else 'locked',
+                'score': float(progress.score) if progress and progress.score is not None else None,
+                'stars': progress.stars if progress else 0,
+                'completed_at': progress.completed_at.isoformat() if progress and progress.completed_at else None,
+            },
+            'events': [{
+                'event_type': event.event_type, 'is_correct': event.is_correct,
+                'hint_count': event.hint_count, 'created_at': event.created_at.isoformat(),
+            } for event in events],
+            'check_questions': check_questions,
+        })
+
+
+class LearningPackageDetailView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, packageId):
+        package = ConceptPackage.objects.select_related('concept__topic__subject', 'theme', 'learning_content').filter(
+            id=packageId, is_published=True,
+        ).first()
+        if not package:
+            concept = Concept.objects.filter(id=packageId).first()
+            if concept and concept.packages.exists():
+                package = concept.packages.select_related('concept__topic__subject', 'theme', 'learning_content').first()
+            else:
+                mission = Mission.objects.filter(id=packageId).first()
+                if mission and mission.concept and mission.concept.packages.exists():
+                    package = mission.concept.packages.select_related('concept__topic__subject', 'theme', 'learning_content').first()
+        if not package:
+            return Response({'error': 'Learning package not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        learning_content = getattr(package, 'learning_content', None)
+        return Response({
+            'id': str(package.id),
+            'concept': {'id': str(package.concept_id), 'name': package.concept.name, 'topic': package.concept.topic.name},
+            'theme': package.theme.name,
+            'content_type': package.content_type,
+            'learning_content': LearningContentSerializer(learning_content).data if learning_content else {
+                'teaching_method': package.teaching_method, 'explanation': package.explanation,
+                'image_url': package.image_url, 'image_prompt': package.image_prompt, 'hints': package.hints,
+                'nova_script': package.nova_script, 'nova_feedback': package.nova_feedback,
+                'learn_before_test': package.learn_before_test,
+            },
+            'learn_before_test': {
+                'steps': LearnBeforeTestStepSerializer(package.learn_steps.all().order_by('order_index'), many=True).data,
+            },
+            'check_for_understanding': CheckForUnderstandingQuestionSerializer(
+                package.cfu_questions.all().order_by('order_index'), many=True,
+            ).data,
+        })
+
+
 # --- JOURNEY ---
 
 class StudentJourneyView(APIView):
@@ -600,13 +908,13 @@ class StudentJourneyView(APIView):
         student = Student.objects.get(id=studentId)
         subject_slug = request.query_params.get('subject', 'literacy')
         
-        subject = Subject.objects.filter(slug__iexact=subject_slug).first()
+        subject = Subject.objects.filter(slug__iexact=subject_slug, topics__in=get_student_topics(student)).distinct().first()
         if not subject:
-            subject = Subject.objects.first()
+            subject = Subject.objects.filter(topics__in=get_student_topics(student)).distinct().first()
 
         worlds = []
         if subject:
-            topics = Topic.objects.filter(subject=subject).order_by('order_index')
+            topics = get_student_topics(student).filter(subject=subject).order_by('order_index')
             for t in topics:
                 tp = StudentTopicProgress.objects.filter(student=student, topic=t).first()
                 meta = getattr(t, 'journey_meta', None)
@@ -783,9 +1091,47 @@ class GetTestResultView(APIView):
             "score": float(attempt.score) if attempt.score else 0.0,
             "correct_count": correct_count,
             "total_questions": total_questions,
-            "xp_awarded": int((attempt.score or 0) * 0.5),
+            "xp_awarded": int(float(attempt.score or 0) * 0.5),
             "extra_learning": recs_list
         })
+
+
+class TestAttemptReviewView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, attemptId):
+        attempt = TestAttempt.objects.select_related('test__topic').filter(id=attemptId).first()
+        if not attempt:
+            return Response({'error': 'Test attempt not found'}, status=status.HTTP_404_NOT_FOUND)
+        if attempt.student.parent_id != request.parent.id:
+            return Response({'error': 'Test attempt does not belong to this parent.'}, status=status.HTTP_403_FORBIDDEN)
+
+        answers = TestAttemptAnswer.objects.filter(attempt=attempt).select_related('question').order_by('question__order_index')
+        return Response({
+            'attempt_id': str(attempt.id), 'test': attempt.test.name,
+            'topic': attempt.test.topic.name, 'score': float(attempt.score) if attempt.score is not None else None,
+            'answers': [{
+                'question_id': str(answer.question_id), 'question': answer.question.question_text,
+                'options': answer.question.options, 'selected_answer': answer.selected_answer,
+                'correct_answer': answer.question.correct_answer, 'is_correct': answer.is_correct,
+            } for answer in answers],
+        })
+
+
+class StudentExtraLearningView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, studentId):
+        student = Student.objects.get(id=studentId)
+        recommendations = ExtraLearningRecommendation.objects.filter(
+            attempt__student=student,
+        ).select_related('mission__topic', 'attempt').order_by('-created_at')
+        return Response({'recommendations': [{
+            'id': str(recommendation.id), 'mission_id': str(recommendation.mission_id),
+            'mission': recommendation.mission.name, 'topic': recommendation.mission.topic.name,
+            'reason': recommendation.reason, 'attempt_id': str(recommendation.attempt_id),
+            'created_at': recommendation.created_at.isoformat(),
+        } for recommendation in recommendations]})
 
 
 # --- CHALLENGE ---
@@ -892,7 +1238,145 @@ class ChallengeBattleResultView(APIView):
         })
 
 
+class ChallengeLeaderboardView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, challengeId):
+        challenge = Challenge.objects.filter(id=challengeId).first()
+        if not challenge:
+            return Response({'error': 'Challenge not found'}, status=status.HTTP_404_NOT_FOUND)
+        scope = request.query_params.get('scope')
+        if scope not in {'friends', 'India', 'global'}:
+            return Response({'scope': ['Use friends, India, or global.']}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            limit = min(max(int(request.query_params.get('limit', 25)), 1), 100)
+        except ValueError:
+            return Response({'limit': ['Use a whole number.']}, status=status.HTTP_400_BAD_REQUEST)
+
+        rows = ChallengeBattle.objects.filter(challenge=challenge, status='completed').values(
+            'student_id', 'student__name', 'student__avatar__character__base_image_url',
+        ).annotate(
+            xp=Sum('score'), battles_played=Count('id'),
+        ).order_by('-xp', '-battles_played')
+        student_id = request.query_params.get('student_id')
+        entries = []
+        current_student = None
+        for rank, row in enumerate(rows, 1):
+            entry = {
+                'rank': rank, 'student_id': str(row['student_id']), 'display_name': row['student__name'],
+                'avatar_url': row['student__avatar__character__base_image_url'],
+                'xp': float(row['xp'] or 0), 'battles_played': row['battles_played'],
+            }
+            if student_id and str(row['student_id']) == student_id:
+                current_student = entry
+            if len(entries) < limit:
+                entries.append(entry)
+        return Response({
+            'scope': scope, 'updated_at': timezone.now().isoformat(), 'total_players': len(rows),
+            'current_student': current_student, 'entries': entries,
+        })
+
+
 # --- PROFILE ---
+
+class StudentBreakPassView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, studentId):
+        student = Student.objects.get(id=studentId)
+        break_passes, _ = StudentBreakPass.objects.get_or_create(student=student)
+        return Response({
+            'available_count': break_passes.available_count, 'used_count': break_passes.used_count,
+            'updated_at': break_passes.updated_at.isoformat(),
+        })
+
+    def post(self, request, studentId):
+        student = Student.objects.get(id=studentId)
+        break_passes, _ = StudentBreakPass.objects.get_or_create(student=student)
+        if break_passes.available_count == 0:
+            return Response({'error': 'No break passes are available.'}, status=status.HTTP_409_CONFLICT)
+        break_passes.available_count -= 1
+        break_passes.used_count += 1
+        break_passes.save(update_fields=['available_count', 'used_count', 'updated_at'])
+        return Response({
+            'used': True, 'available_count': break_passes.available_count,
+            'used_count': break_passes.used_count,
+        })
+
+
+class ParentPinVerifyView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        pin = request.data.get('pin')
+        if not pin:
+            return Response({'pin': ['This field is required.']}, status=status.HTTP_400_BAD_REQUEST)
+        if not request.parent.pin_hash:
+            return Response({'error': 'Parent PIN has not been configured.'}, status=status.HTTP_409_CONFLICT)
+        if not verify_password(str(pin), request.parent.pin_hash):
+            return Response({'verified': False}, status=status.HTTP_401_UNAUTHORIZED)
+        return Response({'verified': True})
+
+
+class ParentEvidenceView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        student_id = request.query_params.get('student_id')
+        topic_id = request.query_params.get('topic_id')
+        if not (student_id and topic_id):
+            return Response({'error': 'student_id and topic_id are required.'}, status=status.HTTP_400_BAD_REQUEST)
+        student = Student.objects.filter(id=student_id, parent=request.parent).first()
+        topic = Topic.objects.filter(id=topic_id).first()
+        if not student or not topic:
+            return Response({'error': 'Student or topic not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+        topic_progress = StudentTopicProgress.objects.filter(student=student, topic=topic).first()
+        missions = Mission.objects.filter(topic=topic)
+        mission_progress = MissionProgress.objects.filter(student=student, mission__in=missions)
+        test_attempts = TestAttempt.objects.filter(student=student, test__topic=topic, status='completed')
+        return Response({
+            'student_id': str(student.id), 'topic': {'id': str(topic.id), 'name': topic.name},
+            'topic_status': topic_progress.status if topic_progress else 'locked',
+            'missions_completed': mission_progress.filter(status='completed').count(),
+            'missions_total': missions.count(),
+            'latest_test_score': float(test_attempts.order_by('-completed_at').first().score) if test_attempts.exists() and test_attempts.order_by('-completed_at').first().score is not None else None,
+            'learning_events': LearningEvent.objects.filter(student=student, mission__topic=topic).count(),
+        })
+
+
+class ParentWeeklyPlanView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        student_id = request.query_params.get('student_id')
+        week = request.query_params.get('week')
+        if not (student_id and week):
+            return Response({'error': 'student_id and week are required.'}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            start_date = datetime.date.fromisoformat(week)
+        except ValueError:
+            return Response({'week': ['Use YYYY-MM-DD.']}, status=status.HTTP_400_BAD_REQUEST)
+        student = Student.objects.filter(id=student_id, parent=request.parent).first()
+        if not student:
+            return Response({'error': 'Student not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+        recommended_missions = MissionRecommendation.objects.filter(student=student, is_active=True).select_related('mission__topic')
+        if not recommended_missions.exists():
+            recommended_missions = Mission.objects.filter(topic__in=get_student_topics(student)).select_related('topic').order_by('topic__order_index', 'order_index')[:7]
+            items = [{'mission': mission, 'reason': 'Continue the curriculum learning path'} for mission in recommended_missions]
+        else:
+            items = [{'mission': recommendation.mission, 'reason': recommendation.reason_text or 'Recommended for this week'} for recommendation in recommended_missions[:7]]
+        return Response({
+            'student_id': str(student.id), 'week_start': start_date.isoformat(),
+            'days': [{
+                'date': (start_date + datetime.timedelta(days=index)).isoformat(),
+                'mission_id': str(items[index]['mission'].id) if index < len(items) else None,
+                'mission': items[index]['mission'].name if index < len(items) else None,
+                'topic': items[index]['mission'].topic.name if index < len(items) else None,
+                'reason': items[index]['reason'] if index < len(items) else None,
+            } for index in range(7)],
+        })
 
 class StudentProfileView(APIView):
     permission_classes = [IsAuthenticated]
@@ -920,8 +1404,9 @@ class StudentOurJourneyView(APIView):
         student = Student.objects.get(id=studentId)
 
         subjects_prog = []
-        for s in Subject.objects.filter(is_active=True):
-            topics = Topic.objects.filter(subject=s)
+        student_topics = get_student_topics(student)
+        for s in Subject.objects.filter(topics__in=student_topics, is_active=True).distinct():
+            topics = student_topics.filter(subject=s)
             if topics.exists():
                 comp = StudentTopicProgress.objects.filter(student=student, topic__in=topics, status='completed').count()
                 pct = int((comp / topics.count()) * 100)
@@ -1060,6 +1545,25 @@ class AdminContentFeedView(APIView):
         learning_content = payload.get('learning_content', {})
         cfu_data = payload.get('check_for_understanding', [])
 
+        # Parse and normalize learn_before_test (Learn Before Test · 3 Steps: Understand -> Example -> Remember)
+        learn_before_test_data = payload.get('learn_before_test') or payload.get('learn_before_steps', {})
+        if isinstance(learn_before_test_data, list):
+            steps_list = learn_before_test_data
+            learn_before_test_obj = {
+                "required": True,
+                "order": [s.get('step_key') or s.get('stepKey') or (
+                    'understand' if i == 0 else ('example' if i == 1 else 'remember')
+                ) for i, s in enumerate(steps_list)],
+                "starts_quiz_after": steps_list[-1].get('step_key', 'remember') if steps_list else 'remember',
+                "steps": steps_list
+            }
+        elif isinstance(learn_before_test_data, dict):
+            steps_list = learn_before_test_data.get('steps', [])
+            learn_before_test_obj = learn_before_test_data
+        else:
+            steps_list = []
+            learn_before_test_obj = {}
+
         package, _ = ConceptPackage.objects.update_or_create(
             concept=concept,
             theme=theme_obj,
@@ -1072,6 +1576,7 @@ class AdminContentFeedView(APIView):
                 'hints': learning_content.get('hints', []),
                 'nova_script': learning_content.get('nova_script', ''),
                 'nova_feedback': learning_content.get('nova_feedback', ''),
+                'learn_before_test': learn_before_test_obj,
                 'check_for_understanding': cfu_data,
                 'raw_payload': payload,
                 'is_published': True,
@@ -1091,10 +1596,48 @@ class AdminContentFeedView(APIView):
                 'hints': learning_content.get('hints', []),
                 'nova_script': learning_content.get('nova_script', ''),
                 'nova_feedback': learning_content.get('nova_feedback', ''),
+                'learn_before_test': learn_before_test_obj,
             }
         )
 
-        # 8. Segregated CheckForUnderstandingQuestion Table
+        # 8. Segregated LearnBeforeTestStep Table (Learn Before Test · 3 Steps)
+        package.learn_steps.all().delete()
+        for idx, s in enumerate(steps_list, 1):
+            default_key = 'understand' if idx == 1 else ('example' if idx == 2 else 'remember')
+            step_key = s.get('step_key') or s.get('stepKey') or default_key
+            title = s.get('title', '')
+            teaching_text = s.get('teaching_text') or s.get('teachingText', '')
+            key_idea = s.get('key_idea') or s.get('keyIdea', '')
+            image_url = s.get('image_url') or s.get('imageUrl', '')
+            image_prompt = s.get('image_prompt') or s.get('imagePrompt', '')
+            nova_script = s.get('nova_script') or s.get('novaScript', '')
+
+            mini_q = s.get('mini_question') or s.get('miniQuestion') or {}
+            if not isinstance(mini_q, dict):
+                mini_q = {}
+            mini_question = {
+                'question': mini_q.get('question', ''),
+                'options': mini_q.get('options', []),
+                'answer': mini_q.get('answer', ''),
+                'explanation': mini_q.get('explanation', '')
+            }
+
+            LearnBeforeTestStep.objects.create(
+                package=package,
+                learning_content=learning_obj,
+                concept=concept,
+                step_key=step_key,
+                title=title,
+                teaching_text=teaching_text,
+                key_idea=key_idea,
+                image_url=image_url,
+                image_prompt=image_prompt,
+                nova_script=nova_script,
+                mini_question=mini_question,
+                order_index=idx
+            )
+
+        # 9. Segregated CheckForUnderstandingQuestion Table
         package.cfu_questions.all().delete()
         for idx, q in enumerate(cfu_data, 1):
             CheckForUnderstandingQuestion.objects.create(
@@ -1318,6 +1861,7 @@ class AdminContentFeedView(APIView):
                     'image_url': package.image_url,
                     'hints': package.hints,
                     'nova_script': package.nova_script,
+                    'learn_before_test': learn_before_test_obj if steps_list else package.learn_before_test,
                     'check_for_understanding': package.check_for_understanding,
                 }
             }
@@ -1346,6 +1890,7 @@ class AdminContentFeedView(APIView):
                 "mission_id": str(mission.id),
                 "test_id": str(topic_test.id),
                 "challenge_id": str(challenge_obj.id),
+                "learn_before_test_steps_saved": len(steps_list),
                 "questions_saved": {
                     "cfu": len(cfu_data),
                     "test": len(test_q_list),
@@ -1516,6 +2061,43 @@ class AdminContentPackageDetailView(APIView):
         nova_script = learning_content_obj.nova_script if learning_content_obj else package.nova_script
         nova_feedback = learning_content_obj.nova_feedback if learning_content_obj else package.nova_feedback
 
+        # Reconstruct learn_before_test from segregated LearnBeforeTestStep table
+        learn_steps_qs = package.learn_steps.all().order_by('order_index')
+        if learn_steps_qs.exists():
+            steps_data = [
+                {
+                    "step_key": s.step_key,
+                    "title": s.title,
+                    "teaching_text": s.teaching_text or '',
+                    "key_idea": s.key_idea or '',
+                    "image_url": s.image_url or '',
+                    "image_prompt": s.image_prompt or '',
+                    "nova_script": s.nova_script or '',
+                    "mini_question": s.mini_question or {
+                        "question": "",
+                        "options": [],
+                        "answer": "",
+                        "explanation": ""
+                    }
+                }
+                for s in learn_steps_qs
+            ]
+            learn_before_test_data = {
+                "required": True,
+                "order": [s.step_key for s in learn_steps_qs],
+                "starts_quiz_after": learn_steps_qs.last().step_key if learn_steps_qs.last() else 'remember',
+                "steps": steps_data
+            }
+        elif package.learn_before_test:
+            learn_before_test_data = package.learn_before_test
+        else:
+            learn_before_test_data = {
+                "required": False,
+                "order": ["understand", "example", "remember"],
+                "starts_quiz_after": "remember",
+                "steps": []
+            }
+
         return Response({
             "id": str(package.id),
             "curriculum": {
@@ -1542,6 +2124,7 @@ class AdminContentPackageDetailView(APIView):
                 "nova_script": nova_script,
                 "nova_feedback": nova_feedback
             },
+            "learn_before_test": learn_before_test_data,
             "check_for_understanding": cfu_questions,
             "test_questions": {
                 "one_time": False,
@@ -1806,4 +2389,3 @@ class ThemeListView(APIView):
             "status": "success",
             "theme": serializer.data
         }, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
-

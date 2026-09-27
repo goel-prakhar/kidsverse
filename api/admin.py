@@ -2,7 +2,7 @@ from django.contrib import admin
 from api.models import (
     Parent, Student, Interest, Goal, AvatarCharacter, AvatarCategory, AvatarItem,
     Curriculum, Theme, Subject, SubjectGradeAvailability, Topic, TopicJourneyMeta, Concept,
-    ConceptPackage, LearningContent, CheckForUnderstandingQuestion, ConceptTestQuestion,
+    ConceptPackage, LearningContent, LearnBeforeTestStep, CheckForUnderstandingQuestion, ConceptTestQuestion,
     BattleQuestion, ConceptQuestion, TopicTier, Mission, Test, TestQuestion,
     Challenge, ChallengeQuestion, ChallengeOpponent
 )
@@ -35,6 +35,10 @@ class TopicAdmin(admin.ModelAdmin):
     list_filter = ('curriculum', 'board', 'grade_level', 'subject')
     search_fields = ('name', 'slug')
 
+class LearnBeforeTestStepInline(admin.TabularInline):
+    model = LearnBeforeTestStep
+    extra = 3
+
 class CFUQuestionInline(admin.TabularInline):
     model = CheckForUnderstandingQuestion
     extra = 1
@@ -62,12 +66,18 @@ class ConceptPackageAdmin(admin.ModelAdmin):
     list_display = ('concept', 'theme', 'is_published', 'created_at')
     list_filter = ('theme', 'is_published')
     search_fields = ('concept__name', 'teaching_method', 'explanation')
-    inlines = [CFUQuestionInline, ConceptTestQuestionInline, BattleQuestionInline, ChallengeQuestionInline]
+    inlines = [LearnBeforeTestStepInline, CFUQuestionInline, ConceptTestQuestionInline, BattleQuestionInline, ChallengeQuestionInline]
 
 @admin.register(LearningContent)
 class LearningContentAdmin(admin.ModelAdmin):
     list_display = ('package', 'concept', 'theme', 'created_at')
     search_fields = ('teaching_method', 'explanation')
+
+@admin.register(LearnBeforeTestStep)
+class LearnBeforeTestStepAdmin(admin.ModelAdmin):
+    list_display = ('package', 'step_key', 'title', 'order_index', 'created_at')
+    list_filter = ('step_key',)
+    search_fields = ('title', 'teaching_text', 'key_idea')
 
 @admin.register(CheckForUnderstandingQuestion)
 class CheckForUnderstandingQuestionAdmin(admin.ModelAdmin):

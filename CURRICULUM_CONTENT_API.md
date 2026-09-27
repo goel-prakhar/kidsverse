@@ -17,6 +17,7 @@ erDiagram
     CONCEPT ||--o{ CONCEPT_PACKAGE : "manifests in"
     THEME ||--o{ CONCEPT_PACKAGE : "styles"
     CONCEPT_PACKAGE ||--|| LEARNING_CONTENT : "has"
+    CONCEPT_PACKAGE ||--o{ LEARN_BEFORE_TEST_STEP : "3 steps (Understand->Example->Remember)"
     CONCEPT_PACKAGE ||--o{ CFU_QUESTION : "has multiple"
     CONCEPT_PACKAGE ||--o{ TEST_QUESTION : "has multiple"
     CONCEPT_PACKAGE ||--o{ BATTLE_QUESTION : "has multiple"
@@ -33,8 +34,9 @@ erDiagram
 | `topics` | `Topic` | Topics bound to Curriculum and Subject (e.g. Fractions, Geometry, Number Systems). |
 | `concepts` | `Concept` | Granular learning concepts under a topic (e.g. Equivalent Fractions) with learning objectives. Can belong to multiple themes. |
 | `themes` | `Theme` | **Stored Separately**: Themes and interests (e.g. Space, Animals, Everyday Life, Robots) with `name`, `slug`, `icon_asset`. |
-| `concept_packages` | `ConceptPackage` | Junction entity binding a `Concept` with a `Theme`. |
+| `concept_packages` | `ConceptPackage` | Junction entity binding a `Concept` with a `Theme`. Storing metadata and raw payload backup. |
 | `learning_contents` | `LearningContent` | **Segregated Table**: Teaching method, explanation, image asset URLs, image generation prompts, pedagogical hints list, and Nova companion scripts/feedback. |
+| `learn_before_test_steps` | `LearnBeforeTestStep` | **Segregated Table**: 3 progressive learning screens before quiz (`understand`, `example`, `remember`), each containing screen title, child-friendly teaching text, key idea takeaway, image url & prompt, Nova script, and interactive mini-question check. |
 | `check_for_understanding_questions` | `CheckForUnderstandingQuestion` | **Segregated Table**: Check For Understanding (CFU) questions with options, answer, difficulty, explanation. |
 | `concept_test_questions` | `ConceptTestQuestion` | **Segregated Table**: Assessment test questions with options, answer, difficulty, marks, and explanation. Also synced to `tests` and `test_questions`. |
 | `battle_questions` | `BattleQuestion` | **Segregated Table**: Rapid-fire battle questions with XP reward, options, answer, difficulty, and battle explanation. |
@@ -79,6 +81,74 @@ Ingests the complete JSON payload exported from the authoring studio. Automatica
     ],
     "nova_script": "Commander, look at the fuel reserves! Can you help calibrate them?",
     "nova_feedback": "Spectacular navigation! You have mastered equivalent fractions."
+  },
+  "learn_before_test": {
+    "required": true,
+    "order": [
+      "understand",
+      "example",
+      "remember"
+    ],
+    "starts_quiz_after": "remember",
+    "steps": [
+      {
+        "step_key": "understand",
+        "title": "Introduce the idea: Fractions represent parts of a whole",
+        "teaching_text": "Imagine a fuel tank divided into 4 equal pods. Taking 2 pods out of 4 (2/4) fills up the exact same amount of space as 1 pod out of 2 (1/2)!",
+        "key_idea": "Fractions with different numbers can still describe the exact same amount.",
+        "image_url": "https://assets.kidsverse.app/concepts/step1_understand_space_fractions.png",
+        "image_prompt": "An astronaut floating in an orbiter comparing two glowing fuel tanks side-by-side, one split into two halves and one into four quarters, highlighting equal fluid levels",
+        "nova_script": "Astronaut Nova here! Notice how both tanks have the same amount of fuel even though the lines are drawn differently?",
+        "mini_question": {
+          "question": "If you take 2 out of 4 equal fuel pods, how much of the tank do you have?",
+          "options": [
+            "Half the tank",
+            "The entire tank",
+            "One quarter"
+          ],
+          "answer": "Half the tank",
+          "explanation": "2 out of 4 parts is half of the entire set of 4 parts."
+        }
+      },
+      {
+        "step_key": "example",
+        "title": "Show it step by step: Multiplying or dividing top and bottom",
+        "teaching_text": "Whenever you multiply or divide the top (numerator) and bottom (denominator) by the same number, the fraction stays equivalent. For example, 1/2 x (2/2) = 2/4!",
+        "key_idea": "Multiplying or dividing top and bottom by the same number creates an equivalent fraction.",
+        "image_url": "https://assets.kidsverse.app/concepts/step2_example_space_fractions.png",
+        "image_prompt": "Futuristic chalkboard in space station showing 1/2 multiplying by 2/2 with arrows to form 2/4 with bright glowing holographic numbers",
+        "nova_script": "Watch how we multiply top and bottom by 2. It’s like magic, but it’s math!",
+        "mini_question": {
+          "question": "What happens if you multiply both the numerator and denominator of 1/2 by 3?",
+          "options": [
+            "You get 3/6",
+            "You get 3/2",
+            "You get 1/6"
+          ],
+          "answer": "You get 3/6",
+          "explanation": "1 x 3 = 3 and 2 x 3 = 6, so you get 3/6 which equals 1/2."
+        }
+      },
+      {
+        "step_key": "remember",
+        "title": "Make it memorable: The Golden Rule of Fractions",
+        "teaching_text": "Whatever you do to the top, you MUST do to the bottom! Keep them in balance and fractions will always stay equal.",
+        "key_idea": "Always treat numerator and denominator equally to keep fractions balanced.",
+        "image_url": "https://assets.kidsverse.app/concepts/step3_remember_space_fractions.png",
+        "image_prompt": "A balance scale in a space laboratory holding the numerator on top and denominator on bottom in perfect equilibrium",
+        "nova_script": "Remember the Golden Rule: Balance the top and bottom, and you’ll ace every quiz!",
+        "mini_question": {
+          "question": "What is the golden rule for keeping fractions equivalent?",
+          "options": [
+            "Do the same operation to both the top and bottom",
+            "Only change the top number",
+            "Always add 1 to the bottom"
+          ],
+          "answer": "Do the same operation to both the top and bottom",
+          "explanation": "Changing both top and bottom by the same factor keeps the ratio identical."
+        }
+      }
+    ]
   },
   "check_for_understanding": [
     {
@@ -152,6 +222,7 @@ Ingests the complete JSON payload exported from the authoring studio. Automatica
     "mission_id": "727a3c31-1ee7-4560-bfdf-793ca0a831e5",
     "test_id": "80f12c34-9ab3-45cd-ef12-3456789abcde",
     "challenge_id": "90e23d45-0bc4-56de-f012-456789abcdef",
+    "learn_before_test_steps_saved": 3,
     "questions_saved": {
       "cfu": 1,
       "test": 1,
@@ -243,6 +314,74 @@ Retrieves the complete content package reconstructed from the segregated relatio
     ],
     "nova_script": "Commander, look at the fuel reserves! Can you help calibrate them?",
     "nova_feedback": "Spectacular navigation! You have mastered equivalent fractions."
+  },
+  "learn_before_test": {
+    "required": true,
+    "order": [
+      "understand",
+      "example",
+      "remember"
+    ],
+    "starts_quiz_after": "remember",
+    "steps": [
+      {
+        "step_key": "understand",
+        "title": "Introduce the idea: Fractions represent parts of a whole",
+        "teaching_text": "Imagine a fuel tank divided into 4 equal pods. Taking 2 pods out of 4 (2/4) fills up the exact same amount of space as 1 pod out of 2 (1/2)!",
+        "key_idea": "Fractions with different numbers can still describe the exact same amount.",
+        "image_url": "https://assets.kidsverse.app/concepts/step1_understand_space_fractions.png",
+        "image_prompt": "An astronaut floating in an orbiter comparing two glowing fuel tanks side-by-side, one split into two halves and one into four quarters, highlighting equal fluid levels",
+        "nova_script": "Astronaut Nova here! Notice how both tanks have the same amount of fuel even though the lines are drawn differently?",
+        "mini_question": {
+          "question": "If you take 2 out of 4 equal fuel pods, how much of the tank do you have?",
+          "options": [
+            "Half the tank",
+            "The entire tank",
+            "One quarter"
+          ],
+          "answer": "Half the tank",
+          "explanation": "2 out of 4 parts is half of the entire set of 4 parts."
+        }
+      },
+      {
+        "step_key": "example",
+        "title": "Show it step by step: Multiplying or dividing top and bottom",
+        "teaching_text": "Whenever you multiply or divide the top (numerator) and bottom (denominator) by the same number, the fraction stays equivalent. For example, 1/2 x (2/2) = 2/4!",
+        "key_idea": "Multiplying or dividing top and bottom by the same number creates an equivalent fraction.",
+        "image_url": "https://assets.kidsverse.app/concepts/step2_example_space_fractions.png",
+        "image_prompt": "Futuristic chalkboard in space station showing 1/2 multiplying by 2/2 with arrows to form 2/4 with bright glowing holographic numbers",
+        "nova_script": "Watch how we multiply top and bottom by 2. It’s like magic, but it’s math!",
+        "mini_question": {
+          "question": "What happens if you multiply both the numerator and denominator of 1/2 by 3?",
+          "options": [
+            "You get 3/6",
+            "You get 3/2",
+            "You get 1/6"
+          ],
+          "answer": "You get 3/6",
+          "explanation": "1 x 3 = 3 and 2 x 3 = 6, so you get 3/6 which equals 1/2."
+        }
+      },
+      {
+        "step_key": "remember",
+        "title": "Make it memorable: The Golden Rule of Fractions",
+        "teaching_text": "Whatever you do to the top, you MUST do to the bottom! Keep them in balance and fractions will always stay equal.",
+        "key_idea": "Always treat numerator and denominator equally to keep fractions balanced.",
+        "image_url": "https://assets.kidsverse.app/concepts/step3_remember_space_fractions.png",
+        "image_prompt": "A balance scale in a space laboratory holding the numerator on top and denominator on bottom in perfect equilibrium",
+        "nova_script": "Remember the Golden Rule: Balance the top and bottom, and you’ll ace every quiz!",
+        "mini_question": {
+          "question": "What is the golden rule for keeping fractions equivalent?",
+          "options": [
+            "Do the same operation to both the top and bottom",
+            "Only change the top number",
+            "Always add 1 to the bottom"
+          ],
+          "answer": "Do the same operation to both the top and bottom",
+          "explanation": "Changing both top and bottom by the same factor keeps the ratio identical."
+        }
+      }
+    ]
   },
   "check_for_understanding": [
     {
@@ -447,6 +586,62 @@ curl -X POST "http://127.0.0.1:8000/api/v1/admin/content/feed" \
       "hints": ["Divide top and bottom by 2", "Half of four is two"],
       "nova_script": "Commander, calibrate the fuel reserves!",
       "nova_feedback": "Spectacular navigation!"
+    },
+    "learn_before_test": {
+      "required": true,
+      "order": ["understand", "example", "remember"],
+      "starts_quiz_after": "remember",
+      "steps": [
+        {
+          "step_key": "understand",
+          "title": "Introduce the idea: Fractions represent parts of a whole",
+          "teaching_text": "Imagine a fuel tank divided into 4 equal pods. Taking 2 pods out of 4 (2/4) fills up the exact same amount of space as 1 pod out of 2 (1/2)!",
+          "key_idea": "Fractions with different numbers can still describe the exact same amount.",
+          "image_url": "https://assets.kidsverse.app/concepts/step1_understand_space_fractions.png",
+          "image_prompt": "An astronaut floating in an orbiter comparing two glowing fuel tanks side-by-side, one split into two halves and one into four quarters",
+          "nova_script": "Notice how both tanks have the same amount of fuel even though the lines are drawn differently?",
+          "mini_question": {
+            "question": "If you take 2 out of 4 equal fuel pods, how much of the tank do you have?",
+            "options": ["Half the tank", "The entire tank", "One quarter"],
+            "answer": "Half the tank",
+            "explanation": "2 out of 4 parts is half of the entire set of 4 parts."
+          }
+        },
+        {
+          "step_key": "example",
+          "title": "Show it step by step: Multiplying or dividing top and bottom",
+          "teaching_text": "Whenever you multiply or divide top and bottom by the same number, the fraction stays equivalent. 1/2 x (2/2) = 2/4!",
+          "key_idea": "Multiplying or dividing top and bottom by the same number creates an equivalent fraction.",
+          "image_url": "https://assets.kidsverse.app/concepts/step2_example_space_fractions.png",
+          "image_prompt": "Futuristic chalkboard in space station showing 1/2 multiplying by 2/2 with arrows to form 2/4",
+          "nova_script": "Watch how we multiply top and bottom by 2. It’s like magic, but it’s math!",
+          "mini_question": {
+            "question": "What happens if you multiply both numerator and denominator of 1/2 by 3?",
+            "options": ["You get 3/6", "You get 3/2", "You get 1/6"],
+            "answer": "You get 3/6",
+            "explanation": "1 x 3 = 3 and 2 x 3 = 6, yielding 3/6."
+          }
+        },
+        {
+          "step_key": "remember",
+          "title": "Make it memorable: The Golden Rule of Fractions",
+          "teaching_text": "Whatever you do to the top, you MUST do to the bottom! Keep them in balance and fractions will always stay equal.",
+          "key_idea": "Always treat numerator and denominator equally to keep fractions balanced.",
+          "image_url": "https://assets.kidsverse.app/concepts/step3_remember_space_fractions.png",
+          "image_prompt": "A balance scale in a space laboratory holding the numerator on top and denominator on bottom in perfect equilibrium",
+          "nova_script": "Remember the Golden Rule: Balance the top and bottom, and you’ll ace every quiz!",
+          "mini_question": {
+            "question": "What is the golden rule for keeping fractions equivalent?",
+            "options": [
+              "Do the same operation to both the top and bottom",
+              "Only change the top number",
+              "Always add 1 to the bottom"
+            ],
+            "answer": "Do the same operation to both the top and bottom",
+            "explanation": "Changing both top and bottom by the same factor keeps the ratio identical."
+          }
+        }
+      ]
     },
     "check_for_understanding": [
       {
