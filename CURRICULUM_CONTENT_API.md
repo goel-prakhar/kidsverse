@@ -35,12 +35,12 @@ erDiagram
 | `concepts` | `Concept` | Granular learning concepts under a topic (e.g. Equivalent Fractions) with learning objectives. Can belong to multiple themes. |
 | `themes` | `Theme` | **Stored Separately**: Themes and interests (e.g. Space, Animals, Everyday Life, Robots) with `name`, `slug`, `icon_asset`. |
 | `concept_packages` | `ConceptPackage` | Junction entity binding a `Concept` with a `Theme`. Storing metadata and raw payload backup. |
-| `learning_contents` | `LearningContent` | **Segregated Table**: Teaching method, explanation, image asset URLs, image generation prompts, pedagogical hints list, and Nova companion scripts/feedback. |
-| `learn_before_test_steps` | `LearnBeforeTestStep` | **Segregated Table**: 3 progressive learning screens before quiz (`understand`, `example`, `remember`), each containing screen title, child-friendly teaching text, key idea takeaway, image url & prompt, Nova script, and interactive mini-question check. |
-| `check_for_understanding_questions` | `CheckForUnderstandingQuestion` | **Segregated Table**: Check For Understanding (CFU) questions with options, answer, difficulty, explanation. |
-| `concept_test_questions` | `ConceptTestQuestion` | **Segregated Table**: Assessment test questions with options, answer, difficulty, marks, and explanation. Also synced to `tests` and `test_questions`. |
-| `battle_questions` | `BattleQuestion` | **Segregated Table**: Rapid-fire battle questions with XP reward, options, answer, difficulty, and battle explanation. |
-| `challenges` & `challenge_questions` | `Challenge` / `ChallengeQuestion` | **Segregated Tables**: Boss challenges with opponent battles and questions with XP, options, correct answer, difficulty, and Nova victory feedback. |
+| `learning_contents` | `LearningContent` | **Segregated Table**: Teaching method, explanation, image asset URLs, image generation prompts, image alt text, pedagogical hints list, and Nova companion scripts/feedback. |
+| `learn_before_test_steps` | `LearnBeforeTestStep` | **Segregated Table**: 3 progressive learning screens before quiz (`understand`, `example`, `remember`), each containing screen title, child-friendly teaching text, key idea takeaway, image url, prompt, image alt, Nova script, interactive mini-question check, and `explanation_ways` micro-scenarios. |
+| `check_for_understanding_questions` | `CheckForUnderstandingQuestion` | **Segregated Table**: Check For Understanding (CFU) questions with options, answer, difficulty, explanation, marks, xp, hints, nova feedback, image url, image prompt, and image alt. |
+| `concept_test_questions` | `ConceptTestQuestion` | **Segregated Table**: Assessment test questions with options, answer, difficulty, marks, xp, hints, nova feedback, image url, image prompt, and image alt. (Optional in new payload). |
+| `battle_questions` | `BattleQuestion` | **Segregated Table**: Rapid-fire battle questions with XP reward, marks, options, answer, difficulty, explanation, hints, nova feedback, image url, image prompt, and image alt. |
+| `challenges` & `challenge_questions` | `Challenge` / `ChallengeQuestion` | **Segregated Tables**: Boss challenges with questions containing XP, marks, options, correct answer, difficulty, hints, nova feedback, image url, image prompt, and image alt. |
 
 ---
 
